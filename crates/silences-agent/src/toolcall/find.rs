@@ -49,6 +49,10 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         Ok(ToolOutcome {
             summary: format!("find: 在 {} 中无匹配 \"{}\"", path, pattern_str),
             inverse: None,
+        
+        rollback: false,
+        
+        approval_pending: None,
         })
     } else {
         let header = format!("find \"{}\" in {}:\n", pattern_str, path);
@@ -57,6 +61,10 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         Ok(ToolOutcome {
             summary: format!("{header}{body}{footer}"),
             inverse: None,
+        
+        rollback: false,
+        
+        approval_pending: None,
         })
     }
 }

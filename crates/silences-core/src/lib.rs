@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 pub struct Message {
     pub role: String,       // "system" | "user" | "assistant" | "tool"
     pub content: String,
+    /// 消息发送者的名称标记，用于区分用户和系统注入指令
+    /// "user" = 用户原始输入, "orch" = system orchestrator 指令
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reasoning_content: Option<String>,  // DeepSeek v4 thinking 模式
     /// assistant 消息的工具调用（DeepSeek / OpenAI 格式）
@@ -23,6 +27,19 @@ impl Message {
         Self {
             role: role.to_string(),
             content: content.to_string(),
+            name: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// 构造带 name 的用户消息
+    pub fn new_user(name: &str, content: &str) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.to_string(),
+            name: Some(name.to_string()),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -34,6 +51,7 @@ impl Message {
         Self {
             role: "assistant".into(),
             content: String::new(),
+            name: None,
             reasoning_content: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
@@ -45,6 +63,7 @@ impl Message {
         Self {
             role: "tool".into(),
             content: content.to_string(),
+            name: None,
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
@@ -137,6 +156,9 @@ pub enum SseEvent {
     /// 工具结果
     #[serde(rename = "tool_result")]
     ToolResult { name: String, summary: String },
+    /// 等待用户审批
+    #[serde(rename = "pending_approval")]
+    PendingApproval { tasks: String, approval_id: String },
     /// 错误
     #[serde(rename = "error")]
     Error { message: String },

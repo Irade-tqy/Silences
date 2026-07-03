@@ -45,8 +45,11 @@ async fn main() -> Result<()> {
         llm = llm.with_tokenizer(&tokenizer_path);
     }
 
-    // 从 DB 加载 system prompt 到内存（serve 函数内会从 DB 读取并设置 system_prompt 状态）
-    // serve 已经接收 db 引用，启动时自动加载
-    silences_server::serve(llm, db, &bind, max_context).await?;
+    // 项目根目录（可选，不设置则自动查找含 .git 的父目录）
+    let project_root = env::var("SILENCES_PROJECT_ROOT")
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    silences_server::serve(llm, db, &bind, max_context, project_root).await?;
     Ok(())
 }

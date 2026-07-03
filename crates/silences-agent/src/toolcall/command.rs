@@ -112,5 +112,8 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     Ok(ToolOutcome {
         summary,
         inverse: None, // command 不可撤销
+        rollback: false,
+    
+        approval_pending: None,
     })
 }

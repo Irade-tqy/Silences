@@ -1235,3 +1235,38 @@ html, body {
     --message-list-max-width: 712px;
   }
 }
+
+/* ── Context Menu (右键菜单) ── */
+.ctx-menu {
+  position: fixed;
+  z-index: 2000;
+  background: var(--ds-bg-layer-1);
+  border: 1px solid var(--ds-border-l2);
+  border-radius: 10px;
+  padding: 4px;
+  min-width: 140px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  animation: ctxFadeIn 0.1s ease;
+}
+@keyframes ctxFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+.ctx-item {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ds-label-primary);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.ctx-item:hover {
+  background: var(--ds-interactive-hover);
+}
+.ctx-item.ctx-danger {
+  color: var(--ds-state-error);
+}
+.ctx-item.ctx-danger:hover {
+  background: rgba(242,90,90,0.12);
+}

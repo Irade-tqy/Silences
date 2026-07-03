@@ -4,10 +4,10 @@
 use std::fs;
 
 use anyhow::{Context, Result};
-use regex::Regex;
+use fancy_regex::Regex;
 use serde_json::Value;
 
-use super::{normalize, InverseOp, ToolDef, ToolOutcome};
+use super::{normalize, read_file_robust, InverseOp, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
@@ -55,8 +55,12 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
 
     if changed_files.is_empty() {
         return Ok(ToolOutcome {
-            summary: format!("replace: 无匹配 \"{}\"", pattern_str),
+            summary: "replace: 无匹配".into(),
             inverse: None,
+        
+        rollback: false,
+        
+        approval_pending: None,
         });
     }
 
@@ -68,9 +72,7 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     let files_owned = changed_files.clone();
     Ok(ToolOutcome {
         summary: format!(
-            "[REPLACED] \"{}\" -> \"{}\" 在 {} 个文件中:\n{}",
-            pattern_str,
-            replacement,
+            "批量替换完成 ({} 个文件):\n{}",
             changed_files.len(),
             file_list.join("\n")
         ),
@@ -83,6 +85,9 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
                 Ok(format!("已恢复 {} 个文件", files_owned.len()))
             },
         )),
+        rollback: false,
+    
+        approval_pending: None,
     })
 }
 
@@ -113,18 +118,32 @@ fn replace_in_file(
     replacement: &str,
     changed: &mut Vec<(String, String)>,
 ) -> Result<()> {
-    let original = match fs::read_to_string(path) {
+    let original = match read_file_robust(path) {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
 
     let content = normalize(&original);
-    let new = re.replace_all(&content, replacement).to_string();
+    let new = replace_all(re, &content, replacement)?;
     if new != content {
         fs::write(path, &new).context("写入文件失败")?;
         changed.push((path.to_string(), original));
     }
     Ok(())
+}
+
+/// 全文替换所有匹配（fancy_regex 不自带 replace_all）
+fn replace_all(re: &Regex, content: &str, replacement: &str) -> Result<String> {
+    let mut result = String::new();
+    let mut last_end = 0;
+    for m in re.find_iter(content) {
+        let m = m.context("正则匹配错误")?;
+        result.push_str(&content[last_end..m.start()]);
+        result.push_str(replacement);
+        last_end = m.end();
+    }
+    result.push_str(&content[last_end..]);
+    Ok(result)
 }
 
 fn is_text_file(path: &std::path::Path) -> bool {

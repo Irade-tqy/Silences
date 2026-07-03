@@ -27,5 +27,6 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 tokenizers = "0.21"
 regex = "1"
+fancy-regex = "0.14"
 tokio-stream = "0.1"
 encoding_rs = "0.8"

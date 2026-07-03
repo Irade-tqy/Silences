@@ -27,6 +27,13 @@ pub enum AgentEvent {
         name: String,
         summary: String,
     },
+    /// 等待用户审批任务列表
+    PendingApproval {
+        /// 任务列表 JSON 字符串
+        tasks: String,
+        /// 审批会话 ID
+        approval_id: String,
+    },
     Usage(TokenUsage),
     Error(String),
 }
@@ -44,6 +51,7 @@ struct AccumTc {
 /// agent 自行管理 LLM↔tool 循环，产生流式事件供后端转发 SSE。
 /// 同时将消息和用量持久化到数据库。
 /// `tool_history` 跨多次 agent run 共享（同 session 的撤回链）。
+/// `checkpoint` 是 messages 的回退点索引，[0..checkpoint) 稳定不变。
 pub fn run_agent(
     llm: LlmClient,
     tools: Vec<ToolDef>,
@@ -60,6 +68,9 @@ pub fn run_agent(
         if tx.send(AgentEvent::Session(session_id.clone())).await.is_err() {
             return;
         }
+
+        // 初始 checkpoint = 传入 messages 的长度
+        let checkpoint = messages.len();
 
         for round in 0..usize::MAX {
             let api_tools = toolcall::build_api_tools(&tools);
@@ -209,6 +220,8 @@ pub fn run_agent(
             messages.push(asst_msg);
 
             // 逐个执行工具
+            let mut needs_rollback = false;
+            let mut pending_approval: Option<(String, String)> = None;
             for tc in tc_accums.values() {
                 let name = match &tc.name {
                     Some(n) => n.clone(),
@@ -252,6 +265,15 @@ pub fn run_agent(
                 // 执行工具（regret 现在由工具自身的 handler 处理）
                 match toolcall::execute_tool(&tools, &name, args).await {
                     Ok(outcome) => {
+                        if outcome.rollback {
+                            needs_rollback = true;
+                        }
+                        if pending_approval.is_none() {
+                            if let Some(ref ap) = outcome.approval_pending {
+                                pending_approval = Some((outcome.summary.clone(), ap.clone()));
+                            }
+                        }
+
                         if tx
                             .send(AgentEvent::ToolResult {
                                 summary: outcome.summary.clone(),
@@ -283,6 +305,24 @@ pub fn run_agent(
                         messages.push(err_msg);
                     }
                 }
+            }
+
+            // 若工具要求审批，发送审批事件并退出
+            if let Some((tasks, approval_id)) = pending_approval {
+                let _ = tx.send(AgentEvent::PendingApproval {
+                    tasks,
+                    approval_id,
+                }).await;
+                // 退出 agent 循环，等待前端审批
+                return;
+            }
+
+            // 若工具要求回退，截断消息到 checkpoint
+            if needs_rollback && checkpoint < messages.len() {
+                messages.truncate(checkpoint);
+                let _ = tx.send(AgentEvent::Text(
+                    "\n\n[上下文已回退，开始下一任务]".into()
+                )).await;
             }
 
             // 继续下一轮（LLM 看到工具结果后继续）

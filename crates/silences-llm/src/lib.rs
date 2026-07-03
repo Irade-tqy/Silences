@@ -65,6 +65,87 @@ impl LlmClient {
         self.clone()
     }
 
+    /// 发送 max_tokens=1 的预热请求，触发服务端计算并缓存 KV cache。
+    ///
+    /// 预热后，实际的 chat_stream 请求可以继承此请求的前缀缓存。
+    /// 适用于：A + u_user + SILENCES.md 等跨轮稳定前缀。
+    pub async fn warmup_prefix(
+        &self,
+        messages: &[Message],
+        system: Option<&str>,
+    ) -> Result<WarmupInfo> {
+        let api_messages = Self::build_api_messages(messages, system);
+
+        let body = json!({
+            "model": self.model,
+            "messages": api_messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "max_tokens": 1,
+        });
+
+        if let Some(ref dir) = self.debug_dir {
+            log_api_request(dir, &body);
+        }
+
+        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let api_key = self.api_key.read().map(|k| k.clone()).unwrap_or_else(|_| String::new());
+        let response = self
+            .http
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {api_key}"))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("预热请求失败")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("预热请求失败 HTTP {status}: {text}");
+        }
+
+        // 流式读取并解析 usage
+        let byte_stream = Box::pin(response.bytes_stream());
+        let mut usage: Option<TokenUsage> = None;
+
+        use futures_util::StreamExt;
+        let mut stream = byte_stream;
+        let mut line_buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let s = String::from_utf8_lossy(&chunk);
+            line_buf.push_str(&s);
+
+            while let Some(nl) = line_buf.find('\n') {
+                let raw = line_buf[..nl].to_string();
+                line_buf.drain(..=nl);
+                let line = raw.trim();
+                if line.is_empty() || !line.starts_with("data: ") { continue; }
+                let json_str = line.strip_prefix("data: ").unwrap().trim();
+                if json_str == "[DONE]" { break; }
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    if let Some(u) = val.get("usage") {
+                        if !u.is_null() {
+                            usage = Some(parse_usage(u));
+                        }
+                    }
+                }
+            }
+        }
+
+        let info = WarmupInfo {
+            total_tokens: usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
+            cache_hit_tokens: usage.as_ref().map(|u| u.cache_hit_tokens).unwrap_or(0),
+            cache_miss_tokens: usage.as_ref().map(|u| u.cache_miss_tokens).unwrap_or(0),
+        };
+
+        eprintln!("[warmup] {} tok (miss {})", info.total_tokens, info.cache_miss_tokens);
+        Ok(info)
+    }
+
     pub fn with_tokenizer(mut self, path: &str) -> Self {
         self.tokenizer = Tokenizer::from_file(path).ok();
         if self.tokenizer.is_none() {
@@ -102,6 +183,9 @@ impl LlmClient {
                 json!(msg.content)
             };
             let mut m = json!({"role": msg.role, "content": content_val});
+            if let Some(ref name) = msg.name {
+                m["name"] = json!(name);
+            }
             if let Some(ref tc) = msg.tool_calls {
                 m["tool_calls"] = json!(tc);
             }
@@ -309,6 +393,17 @@ impl ChatStream {
     pub fn take_usage(&mut self) -> Option<TokenUsage> {
         self.usage.take()
     }
+}
+
+/// 预热请求结果
+#[derive(Debug, Clone)]
+pub struct WarmupInfo {
+    /// 总 prompt tokens
+    pub total_tokens: u32,
+    /// 命中的缓存 tokens（预热前已有缓存的部分）
+    pub cache_hit_tokens: u32,
+    /// 本次新计算并写入缓存的 tokens
+    pub cache_miss_tokens: u32,
 }
 
 /// 从 API usage 字段解析 TokenUsage

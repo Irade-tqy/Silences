@@ -68,6 +68,10 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
                 Ok(ToolOutcome {
                     summary,
                     inverse: None,
+                
+        rollback: false,
+                
+        approval_pending: None,
                 })
             })
         }),

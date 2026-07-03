@@ -6,22 +6,32 @@ pub mod glance;
 pub mod grep;
 pub mod read;
 pub mod raw_read;
-pub mod create;
 pub mod edit;
 pub mod raw_edit;
+pub mod write;
 pub mod replace;
 pub mod find;
 pub mod regret;
 pub mod command;
 pub mod trash;
+pub mod start_task;
+pub mod end_task;
+pub mod present_task_list;
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
+use tokenizers::Tokenizer;
+use tokio::sync::Mutex;
 
 use self::regret::ToolHistory;
-use tokio::sync::Mutex;
+
+/// 写前检查保护：记录已被 read / raw_read 读取过的文件路径。
+/// write 工具覆写文件前必须在此注册表中。
+pub type ReadTracker = Arc<Mutex<HashSet<String>>>;
 
 /// 工具定义
 pub struct ToolDef {
@@ -46,6 +56,10 @@ pub struct ToolOutcome {
     pub summary: String,
     /// 用于 regret 的逆操作（None 表示不可撤销）
     pub inverse: Option<InverseOp>,
+    /// 若为 true，agent loop 在此轮工具全部执行后回退消息到 checkpoint
+    pub rollback: bool,
+    /// 若设置，表示需要用户审批，值为审批会话 ID
+    pub approval_pending: Option<String>,
 }
 
 impl fmt::Debug for ToolOutcome {
@@ -53,6 +67,8 @@ impl fmt::Debug for ToolOutcome {
         f.debug_struct("ToolOutcome")
             .field("summary", &self.summary)
             .field("inverse", &self.inverse.is_some())
+            .field("rollback", &self.rollback)
+            .field("approval_pending", &self.approval_pending.is_some())
             .finish()
     }
 }
@@ -104,14 +120,155 @@ pub fn normalize(s: &str) -> String {
         .join("\n")
 }
 
+/// 编码鲁棒的文件读取函数。
+///
+/// 优先尝试 UTF-8（快速路径），失败后依次尝试常见 Windows 代码页编码：
+/// GBK (CP936), Shift_JIS (CP932), EUC-KR (CP949), Windows-1252 (CP1252)。
+/// 全部失败则回退到 `from_utf8_lossy`。
+pub fn read_file_robust(path: &str) -> Result<String, anyhow::Error> {
+    let bytes = std::fs::read(path).context("读取文件失败")?;
+
+    // UTF-8 快速路径
+    if let Ok(s) = std::str::from_utf8(&bytes) {
+        return Ok(s.to_owned());
+    }
+
+    // 尝试常见 Windows 代码页
+    const WINDOWS_CODEPAGES: &[&encoding_rs::Encoding] = &[
+        encoding_rs::GBK,
+        encoding_rs::SHIFT_JIS,
+        encoding_rs::EUC_KR,
+        encoding_rs::WINDOWS_1252,
+    ];
+
+    for encoding in WINDOWS_CODEPAGES {
+        if let Some(decoded) =
+            encoding.decode_without_bom_handling_and_without_replacement(&bytes)
+        {
+            return Ok(decoded.into_owned());
+        }
+    }
+
+    // 兜底
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// 惰性加载 DeepSeek tokenizer。
+/// 搜索顺序：SILENCES_TOKENIZER_PATH 环境变量 → 本项目已知相对路径。
+fn get_tokenizer() -> Option<&'static Tokenizer> {
+    static TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
+    TOKENIZER
+        .get_or_init(|| {
+            let candidates: &[&str] = &[
+                // 环境变量覆盖
+                // 运行时常见路径
+                "./tokenizer/tokenizer.json",
+                "../tokenizer/tokenizer.json",
+                "../../tokenizer/tokenizer.json",
+            ];
+
+            // 优先环境变量
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            if let Ok(env_path) = std::env::var("SILENCES_TOKENIZER_PATH") {
+                paths.push(std::path::PathBuf::from(env_path));
+            }
+            for c in candidates {
+                paths.push(std::path::PathBuf::from(c));
+            }
+
+            for p in &paths {
+                if p.exists() {
+                    match Tokenizer::from_file(p) {
+                        Ok(t) => {
+                            eprintln!("[toolcall] loaded tokenizer from {}", p.display());
+                            return Some(t);
+                        }
+                        Err(e) => {
+                            eprintln!("[toolcall] 警告: tokenizer 加载失败 {}: {e}", p.display());
+                        }
+                    }
+                }
+            }
+            eprintln!("[toolcall] 警告: 未找到 tokenizer.json，回退字节估算");
+            None
+        })
+        .as_ref()
+}
+
+/// 大文件自动截断预览。
+///
+/// 使用 DeepSeek tokenizer 精确计数；tokenizer 不可用时回退字节估算（1 tok ≈ 4 字节）。
+/// 用 tokenizer offset 信息在精确的字符边界截断，保留开头 `head_tok` + 结尾 `tail_tok`。
+///
+/// 返回（截断后的内容, 是否被截断）。
+pub fn auto_truncate(
+    content: &str,
+    threshold_tok: usize,
+    head_tok: usize,
+    tail_tok: usize,
+) -> (String, bool) {
+    // ── 用真实 tokenizer 精确计数 ──
+    if let Some(tok) = get_tokenizer() {
+        if let Ok(enc) = tok.encode(content, true) {
+            let total = enc.len();
+            if total <= threshold_tok || head_tok + tail_tok >= total {
+                return (content.to_owned(), false);
+            }
+
+            let head_tok = head_tok.min(total);
+            let tail_tok = tail_tok.min(total);
+
+            let offsets = enc.get_offsets();
+            let head_end = offsets[head_tok.saturating_sub(1)].1.min(content.len());
+            let tail_start = offsets[total - tail_tok].0;
+            let tail_start = tail_start.max(head_end).min(content.len());
+
+            let truncated = format!(
+                "{}…\n[截断：文件较大 (~{} tok)，仅显示开头 {} tok + 结尾 {} tok]\n…{}",
+                &content[..head_end],
+                total,
+                head_tok,
+                tail_tok,
+                &content[tail_start..]
+            );
+            return (truncated, true);
+        }
+    }
+
+    // ── 回退：字节估算 ──
+    let threshold = threshold_tok * 4;
+    let head = head_tok * 4;
+    let tail = tail_tok * 4;
+
+    if content.len() <= threshold {
+        return (content.to_owned(), false);
+    }
+
+    let head_end = content.floor_char_boundary(head.min(content.len()));
+    let tail_start = content
+        .floor_char_boundary(content.len().saturating_sub(tail))
+        .max(head_end);
+
+    let truncated = format!(
+        "{}…\n[截断：文件较大 (~{}B)，仅显示开头 ~{}tok + 结尾 ~{}tok]\n…{}",
+        &content[..head_end],
+        content.len(),
+        head_tok,
+        tail_tok,
+        &content[tail_start..]
+    );
+
+    (truncated, true)
+}
+
 /// 注册所有工具
-pub fn all_tools(history: Arc<Mutex<ToolHistory>>) -> Vec<ToolDef> {
+pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker) -> Vec<ToolDef> {
     vec![
         glance::tool(),
         grep::tool(),
-        read::tool(),
-        raw_read::tool(),
-        create::tool(),
+        read::tool(read_tracker.clone()),
+        raw_read::tool(read_tracker.clone()),
+        write::tool(read_tracker),
         edit::tool(),
         raw_edit::tool(),
         replace::tool(),
@@ -119,6 +276,9 @@ pub fn all_tools(history: Arc<Mutex<ToolHistory>>) -> Vec<ToolDef> {
         regret::tool(history),
         command::tool(),
         trash::tool(),
+        start_task::tool(),
+        end_task::tool(),
+        present_task_list::tool(),
     ]
 }
 

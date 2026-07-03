@@ -1,13 +1,13 @@
-//! raw_edit — 按正则替换文件中第一个匹配（按行号最近）
+//! raw_edit — 按正则替换文件中第一个匹配（全文匹配，支持 PCRE 锚点）
 //! 不做任何换行符或缩进标准化，保持文件原始格式。
 
 use std::fs;
 
 use anyhow::{Context, Result};
-use regex::Regex;
+use fancy_regex::Regex;
 use serde_json::Value;
 
-use super::{InverseOp, ToolDef, ToolOutcome};
+use super::{read_file_robust, InverseOp, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
@@ -48,56 +48,57 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     let target_line = args.get("line").and_then(Value::as_u64);
 
     let re = Regex::new(pattern_str).context("正则表达式无效")?;
-    let original = fs::read_to_string(file).context("读取文件失败")?;
+    let original = read_file_robust(file)?;
 
-    // 找到所有匹配及其行号
-    let lines: Vec<&str> = original.lines().collect();
-    let mut matches: Vec<(usize, usize, usize)> = Vec::new(); // (line_no, byte_start, byte_end)
-
-    for (i, line) in lines.iter().enumerate() {
-        for m in re.find_iter(line) {
-            matches.push((i + 1, m.start(), m.end()));
-        }
+    // 全文匹配（不按行拆分，支持跨行正则）
+    let mut matches_positions: Vec<(usize, usize)> = Vec::new(); // (byte_start, byte_end)
+    for m in re.find_iter(&original) {
+        let m = m.context("正则匹配错误")?;
+        matches_positions.push((m.start(), m.end()));
     }
 
-    if matches.is_empty() {
+    if matches_positions.is_empty() {
         anyhow::bail!("未找到匹配 \"{}\"", pattern_str);
     }
 
-    // 选择匹配
-    let (match_line, byte_start_in_line, byte_end_in_line) = match target_line {
-        Some(tl) => {
-            // 按行号最近排序
-            matches.sort_by_key(|(line, _, _)| (*line as isize - tl as isize).abs());
-            matches[0]
-        }
-        None => {
-            if matches.len() > 1 {
-                anyhow::bail!(
-                    "匹配不唯一（{} 处），请指定 line 参数选择目标行",
-                    matches.len()
-                );
-            }
-            matches[0]
+    // 构建行起始字节偏移表 → O(log n) 字节定位行号
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(original.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let pos_to_line = |pos: usize| -> usize {
+        match line_starts.binary_search(&pos) {
+            Ok(i) => i + 1,
+            Err(i) => i,
         }
     };
 
-    // 计算在全文中的绝对字节偏移
-    let abs_start: usize = lines[..match_line - 1]
-        .iter()
-        .map(|l| l.len() + 1) // +1 for newline
-        .sum::<usize>()
-        + byte_start_in_line;
-    let abs_end = abs_start + (byte_end_in_line - byte_start_in_line);
+    let (abs_start, abs_end) = match target_line {
+        Some(tl) => {
+            let tl = tl as usize;
+            matches_positions.sort_by_key(|&(start, _)| {
+                (pos_to_line(start) as isize - tl as isize).abs()
+            });
+            matches_positions[0]
+        }
+        None => {
+            if matches_positions.len() > 1 {
+                anyhow::bail!(
+                    "匹配不唯一（{} 处），请指定 line 参数选择目标行",
+                    matches_positions.len()
+                );
+            }
+            matches_positions[0]
+        }
+    };
 
+    let match_line = pos_to_line(abs_start);
     let new_content = format!("{}{}{}", &original[..abs_start], replacement, &original[abs_end..]);
 
     fs::write(file, &new_content).context("写入文件失败")?;
 
-    let preview: String = replacement.chars().take(60).collect();
     let file_owned = file.to_string();
     Ok(ToolOutcome {
-        summary: format!("已编辑 {}:{} (替换为 \"{}\")", file, match_line, preview),
+        summary: format!("已编辑 {}:{}", file, match_line),
         inverse: Some(InverseOp::new(
             format!("raw_edit on {}", file),
             move || {
@@ -105,5 +106,8 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
                 Ok(format!("已恢复 {}", file_owned))
             },
         )),
+        rollback: false,
+    
+        approval_pending: None,
     })
 }

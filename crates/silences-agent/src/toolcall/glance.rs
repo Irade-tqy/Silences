@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{ToolDef, ToolOutcome};
+use super::{read_file_robust, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
@@ -41,6 +41,9 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     Ok(ToolOutcome {
         summary,
         inverse: None,
+        rollback: false,
+    
+        approval_pending: None,
     })
 }
 
@@ -79,7 +82,7 @@ fn glance_dir(path: &str) -> Result<String> {
 fn glance_file(path: &str) -> Result<String> {
     let meta = fs::metadata(path).context("读取文件信息失败")?;
     let size = meta.len();
-    let content = fs::read_to_string(path).ok();
+    let content = read_file_robust(path).ok();
     let line_count = content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
 
     let comment_hint = if let Some(ref c) = content {
@@ -98,7 +101,7 @@ fn glance_file(path: &str) -> Result<String> {
 
 /// 读取文件的开头连续注释行
 fn read_leading_comments(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
+    let content = read_file_robust(&path.to_string_lossy()).ok()?;
     leading_comment_lines(&content)
 }
 

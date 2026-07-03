@@ -77,6 +77,9 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
                 Ok(format!("已恢复到 {}", orig_s))
             },
         )),
+        rollback: false,
+    
+        approval_pending: None,
     })
 }
 

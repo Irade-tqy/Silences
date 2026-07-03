@@ -3,10 +3,10 @@
 use std::fs;
 
 use anyhow::{Context, Result};
-use regex::Regex;
+use fancy_regex::Regex;
 use serde_json::Value;
 
-use super::{normalize, ToolDef, ToolOutcome};
+use super::{normalize, read_file_robust, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
@@ -50,6 +50,10 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         Ok(ToolOutcome {
             summary: format!("grep: 无匹配 \"{}\"", pattern_str),
             inverse: None,
+        
+        rollback: false,
+        
+        approval_pending: None,
         })
     } else {
         let summary = format!(
@@ -61,6 +65,10 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         Ok(ToolOutcome {
             summary,
             inverse: None,
+        
+        rollback: false,
+        
+        approval_pending: None,
         })
     }
 }
@@ -83,14 +91,14 @@ fn search_dir(dir: &str, re: &Regex, results: &mut Vec<String>) -> Result<()> {
 }
 
 fn search_file(path: &str, re: &Regex, results: &mut Vec<String>) -> Result<()> {
-    let content = match fs::read_to_string(path) {
+    let content = match read_file_robust(path) {
         Ok(c) => normalize(&c),
         Err(_) => return Ok(()), // 二进制文件跳过
     };
 
     let lines: Vec<&str> = content.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if re.is_match(line) {
+        if re.is_match(line).unwrap_or(false) {
             let start = i.saturating_sub(3);
             let end = (i + 4).min(lines.len());
             let mut ctx = Vec::new();

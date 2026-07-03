@@ -1,23 +1,30 @@
 //! raw_read — 读取文件原始内容（不做换行和缩进标准化）
 
-use std::fs;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use tokio::sync::Mutex;
 
-use super::{ToolDef, ToolOutcome};
+use super::{auto_truncate, read_file_robust, ReadTracker, ToolDef, ToolOutcome};
 
-pub fn tool() -> ToolDef {
+pub fn tool(read_tracker: ReadTracker) -> ToolDef {
+    let tracker = read_tracker.clone();
     ToolDef {
         name: "raw_read",
         description:
-            "读取文件原始内容，不做任何标准化。若文件为空返回提示。\nwhy: 需要查看文件的原始格式（原始换行符、Tab 等）时使用。",
+            "读取文件原始内容，不做任何标准化。若文件为空返回提示。\nwhy: 需要查看文件的原始格式（原始换行符、Tab 等）时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
                     "description": "文件绝对路径"
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "是否读取全部内容（默认 false，大文件自动截断）"
                 },
                 "start_line": {
                     "type": "integer",
@@ -31,34 +38,52 @@ pub fn tool() -> ToolDef {
             "required": ["path"],
             "additionalProperties": false
         }),
-        handler: Box::new(|args| Box::pin(execute(args))),
+        handler: Box::new(move |args| {
+            let rt = tracker.clone();
+            Box::pin(async move { execute(args, rt).await })
+        }),
     }
 }
 
-async fn execute(args: Value) -> Result<ToolOutcome> {
+async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
 
     if !std::path::Path::new(path).exists() {
         anyhow::bail!("文件不存在: {}", path);
     }
 
-    let content = fs::read_to_string(path).context("读取文件失败")?;
+    let content = read_file_robust(path)?;
 
     if content.is_empty() {
         return Ok(ToolOutcome {
             summary: format!("[空文件] {}", path),
             inverse: None,
+
+        rollback: false,
+
+        approval_pending: None,
         });
     }
 
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
+    // 自动截断：仅当 all=false 且未指定显式行范围时才生效
+    let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let has_explicit_range = args.get("start_line").is_some() || args.get("end_line").is_some();
+    let display_content = if !all && !has_explicit_range {
+        let (truncated, _) = auto_truncate(&content, 2000, 1500, 500);
+        truncated
+    } else {
+        content.clone()
+    };
+
+    let total = content.lines().count();
+    let lines: Vec<&str> = display_content.lines().collect();
+    let display_total = lines.len();
 
     let start = args["start_line"].as_u64().unwrap_or(1) as usize;
-    let end = args["end_line"].as_u64().map(|e| e as usize).unwrap_or(total);
+    let end = args["end_line"].as_u64().map(|e| e as usize).unwrap_or(display_total);
 
-    let start = start.max(1).min(total);
-    let end = end.max(start).min(total);
+    let start = start.max(1).min(display_total);
+    let end = end.max(start).min(display_total);
 
     let selected: Vec<String> = lines[start - 1..end]
         .iter()
@@ -75,8 +100,21 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         selected.join("\n")
     );
 
+    // 注册已读文件（写前检查用）
+    let mut tracker = read_tracker.lock().await;
+    if let Ok(abs) = std::path::absolute(path) {
+        tracker.insert(abs.to_string_lossy().replace('\\', "/"));
+    } else {
+        tracker.insert(path.to_string());
+    }
+    drop(tracker);
+
     Ok(ToolOutcome {
         summary,
         inverse: None,
+
+        rollback: false,
+
+        approval_pending: None,
     })
 }

@@ -145,6 +145,7 @@ impl Db {
                     role: row.get(0)?,
                     content: row.get(1)?,
                     reasoning_content: row.get(2)?,
+                    name: None,
                     tool_calls,
                     tool_call_id: row.get(4)?,
                 })
