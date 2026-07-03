@@ -1,7 +1,9 @@
 //! Agent 循环：LLM ↔ 工具调度 ↔ 流式输出
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use silences_core::{Message, TokenUsage, ToolCallValue, ToolCallFunction};
@@ -11,6 +13,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use crate::toolcall::regret::ToolHistory;
 use crate::toolcall::{self, ToolDef};
+use crate::context;
 
 /// Agent 产生的对外事件
 #[derive(Debug, Clone)]
@@ -35,6 +38,8 @@ pub enum AgentEvent {
         approval_id: String,
     },
     Usage(TokenUsage),
+    /// 上下文回退通知（前端应关闭当前消息，开启新空消息）
+    ContextRollback,
     Error(String),
 }
 
@@ -52,6 +57,7 @@ struct AccumTc {
 /// 同时将消息和用量持久化到数据库。
 /// `tool_history` 跨多次 agent run 共享（同 session 的撤回链）。
 /// `checkpoint` 是 messages 的回退点索引，[0..checkpoint) 稳定不变。
+/// `session_dir` 是会话的上下文目录（.silences/sessions/{id}），用于读写 CONTEXT.md。
 pub fn run_agent(
     llm: LlmClient,
     tools: Vec<ToolDef>,
@@ -60,6 +66,8 @@ pub fn run_agent(
     tool_history: Arc<Mutex<ToolHistory>>,
     db: Arc<Mutex<Db>>,
     session_id: String,
+    session_dir: Option<PathBuf>,
+    tool_delay_ms: u64,
 ) -> ReceiverStream<AgentEvent> {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
 
@@ -69,8 +77,11 @@ pub fn run_agent(
             return;
         }
 
-        // 初始 checkpoint = 传入 messages 的长度
-        let checkpoint = messages.len();
+        // 初始 checkpoint = 传入 messages 的长度（前移以保护摘要不截断）
+        let mut checkpoint = messages.len();
+        // 延迟回退标志 + 累积摘要
+        let mut pending_rollback = false;
+        let mut summaries: Vec<String> = Vec::new();
 
         for round in 0..usize::MAX {
             let api_tools = toolcall::build_api_tools(&tools);
@@ -176,18 +187,65 @@ pub fn run_agent(
                     if !full_reasoning.is_empty() {
                         final_asst.reasoning_content = Some(full_reasoning);
                     }
-                    // 保存到 DB
                     {
                         let db_lock = db.lock().await;
                         let _ = db_lock.save_message(&session_id, &final_asst);
                     }
                 }
-                if let Some(u) = usage {
+
+                // 保存用量
+                if let Some(ref u) = usage {
                     let _ = tx.send(AgentEvent::Usage(u.clone())).await;
                     {
                         let db_lock = db.lock().await;
-                        let _ = db_lock.save_usage(&session_id, round as u32, &u);
+                        let _ = db_lock.save_usage(&session_id, round as u32, u);
                     }
+                }
+
+                // 检查是否有待处理的延迟回退（end_task → u_orch → 模型更新 CONTEXT.md 后 stop）
+                if pending_rollback {
+                    pending_rollback = false;
+
+                    // 捕获本轮总结，累积不截断
+                    let round_summary = full_text.clone();
+                    if !round_summary.is_empty() {
+                        summaries.push(round_summary);
+                    }
+
+                    if checkpoint < messages.len() {
+                        messages.truncate(checkpoint);
+
+                        // 1. 重放所有累积摘要（assistant, 无 name），前移 checkpoint 保护它们
+                        for s in &summaries {
+                            messages.push(Message {
+                                role: "assistant".into(),
+                                content: s.clone(),
+                                name: None,
+                                reasoning_content: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                        }
+                        checkpoint = messages.len(); // 摘要进入稳定区，下次截断保留
+
+                        // 2. 刷新 B_delta / CONTEXT.md（name 用绝对路径）
+                        if let Some(ref session_dir) = session_dir {
+                            if let Some(fresh) = context::read_context_md(session_dir) {
+                                let ctx_name = session_dir.join("CONTEXT.md").to_string_lossy().to_string();
+                                if let Some(pos) = messages.iter().rposition(|m| m.name.as_deref() == Some(&ctx_name)) {
+                                    messages[pos].content = fresh;
+                                } else {
+                                    messages.push(Message::new_user(&ctx_name, &fresh));
+                                }
+                            }
+                        }
+
+                        // 3. push 继续执行
+                        messages.push(Message::new_user("orch", "继续执行后续任务。"));
+
+                        let _ = tx.send(AgentEvent::ContextRollback).await;
+                    }
+                    continue;
                 }
                 return;
             }
@@ -212,15 +270,24 @@ pub fn run_agent(
             if !full_reasoning.is_empty() {
                 asst_msg.reasoning_content = Some(full_reasoning);
             }
-            // 保存 assistant 消息
             {
                 let db_lock = db.lock().await;
                 let _ = db_lock.save_message(&session_id, &asst_msg);
             }
             messages.push(asst_msg);
 
+            // 保存本轮 usage（tool call 轮次的 API 用量）
+            if let Some(ref u) = usage {
+                let _ = tx.send(AgentEvent::Usage(u.clone())).await;
+                {
+                    let db_lock = db.lock().await;
+                    let _ = db_lock.save_usage(&session_id, round as u32, u);
+                }
+            }
+
             // 逐个执行工具
             let mut needs_rollback = false;
+            let mut needs_defer_rollback = false;
             let mut pending_approval: Option<(String, String)> = None;
             for tc in tc_accums.values() {
                 let name = match &tc.name {
@@ -238,7 +305,6 @@ pub fn run_agent(
                     .clone()
                     .unwrap_or_else(|| format!("call_{}", round));
 
-                // 通知前端
                 if tx
                     .send(AgentEvent::ToolCalling {
                         name: name.clone(),
@@ -246,7 +312,6 @@ pub fn run_agent(
                     })
                     .await.is_err() { return; }
 
-                // 解析参数
                 let args: Value = match serde_json::from_str(args_str) {
                     Ok(v) => v,
                     Err(e) => {
@@ -262,11 +327,38 @@ pub fn run_agent(
                     }
                 };
 
-                // 执行工具（regret 现在由工具自身的 handler 处理）
+                // 审批拦截：start_task/end_task 需要用户先通过 present_task_list 审批
+                if name == "start_task" || name == "end_task" {
+                    // 模型在 pending_rollback 期间开启了新任务 → 清除延迟回退
+                    if pending_rollback {
+                        pending_rollback = false;
+                        eprintln!("[agent] 清除 pending_rollback（模型已开始新任务 {}）", name);
+                    }
+                    let approved = messages.iter().any(|m| {
+                        m.role == "user"
+                            && m.name.as_deref() == Some("orch")
+                            && m.content.contains("通过")
+                    });
+                    if !approved {
+                        let err = format!("{name} 需要先通过 present_task_list 审批才能使用（审批消息必须包含「通过」二字）");
+                        let _ = tx.send(AgentEvent::Error(err.clone())).await;
+                        let err_msg = Message::new_tool_result(&id, &err);
+                        {
+                            let db_lock = db.lock().await;
+                            let _ = db_lock.save_message(&session_id, &err_msg);
+                        }
+                        messages.push(err_msg);
+                        continue;
+                    }
+                }
+
                 match toolcall::execute_tool(&tools, &name, args).await {
                     Ok(outcome) => {
                         if outcome.rollback {
                             needs_rollback = true;
+                        }
+                        if outcome.defer_rollback {
+                            needs_defer_rollback = true;
                         }
                         if pending_approval.is_none() {
                             if let Some(ref ap) = outcome.approval_pending {
@@ -281,7 +373,6 @@ pub fn run_agent(
                             })
                             .await.is_err() { return; }
 
-                        // 记录逆操作（command 不可撤销）
                         if let Some(inv) = outcome.inverse {
                             let mut history = tool_history.lock().await;
                             history.push(&name, inv);
@@ -293,6 +384,22 @@ pub fn run_agent(
                             let _ = db_lock.save_message(&session_id, &tool_msg);
                         }
                         messages.push(tool_msg);
+
+                        // 注入额外消息（如 end_task 注入 u_orch）
+                        for mut inject_msg in outcome.inject_messages {
+                            // 在 orch 指令中嵌入 CONTEXT.md 的绝对路径
+                            if inject_msg.name.as_deref() == Some("orch") {
+                                if let Some(ref session_dir) = session_dir {
+                                    let ctx_path = session_dir.join("CONTEXT.md").to_string_lossy().to_string();
+                                    inject_msg.content = inject_msg.content.replace("CONTEXT.md", &ctx_path);
+                                }
+                            }
+                            {
+                                let db_lock = db.lock().await;
+                                let _ = db_lock.save_message(&session_id, &inject_msg);
+                            }
+                            messages.push(inject_msg);
+                        }
                     }
                     Err(e) => {
                         let err = format!("{name} 执行失败: {e}");
@@ -307,22 +414,30 @@ pub fn run_agent(
                 }
             }
 
-            // 若工具要求审批，发送审批事件并退出
+            // 审批退出：展示任务列表后等待用户审批
             if let Some((tasks, approval_id)) = pending_approval {
                 let _ = tx.send(AgentEvent::PendingApproval {
                     tasks,
                     approval_id,
                 }).await;
-                // 退出 agent 循环，等待前端审批
                 return;
             }
 
-            // 若工具要求回退，截断消息到 checkpoint
+            // 延迟回退（end_task）：已注入 u_orch，下一轮工具执行完再截断
+            if needs_defer_rollback {
+                pending_rollback = true;
+                continue;
+            }
+
+            // 普通回退（非 defer）
             if needs_rollback && checkpoint < messages.len() {
                 messages.truncate(checkpoint);
-                let _ = tx.send(AgentEvent::Text(
-                    "\n\n[上下文已回退，开始下一任务]".into()
-                )).await;
+                let _ = tx.send(AgentEvent::ContextRollback).await;
+            }
+
+            // 工具循环延迟（调试用）
+            if tool_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(tool_delay_ms)).await;
             }
 
             // 继续下一轮（LLM 看到工具结果后继续）
@@ -331,4 +446,3 @@ pub fn run_agent(
 
     ReceiverStream::new(rx)
 }
-
