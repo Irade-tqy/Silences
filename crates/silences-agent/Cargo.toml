@@ -1,0 +1,16 @@
+[package]
+name = "silences-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+silences-core = { path = "../silences-core" }
+silences-llm = { path = "../silences-llm" }
+silences-db = { path = "../silences-db" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+anyhow.workspace = true
+regex.workspace = true
+futures-util.workspace = true
+tokio-stream.workspace = true
+encoding_rs.workspace = true
