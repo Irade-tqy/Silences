@@ -39,6 +39,21 @@ interface ToolCallEntry {
 interface AppSettings {
   api_key: string | null;
   system_prompt: string | null;
+  warmup_enabled: boolean;
+}
+
+interface RawMessage {
+  role: string;
+  content: string;
+  name?: string;
+  reasoning_content?: string;
+  tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+}
+
+interface SessionState {
+  context: RawMessage[];
+  tasks: Array<{ id: string; description: string }>;
 }
 
 // ─── Config ──────────────────────────────────────────────
@@ -87,6 +102,11 @@ function fmtNum(n: number): string {
   return n.toString();
 }
 
+function truncateContent(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + '...';
+}
+
 // ─── Page ────────────────────────────────────────────────
 
 export default function Page() {
@@ -105,8 +125,8 @@ export default function Page() {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   // settings = 服务端返回的已保存值（掩盖后的 api_key），用于 placeholder
   // settingsDirty = 输入框当前编辑值
-  const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null });
-  const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '' });
+  const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null, warmup_enabled: true });
+  const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true });
   const [settingsSaving, setSettingsSaving] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const msgEndRef = useRef<HTMLDivElement>(null);
@@ -118,6 +138,9 @@ export default function Page() {
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
+  const [sessionState, setSessionState] = useState<SessionState | null>(null);
+  const [collapsedCtxCards, setCollapsedCtxCards] = useState<Record<number, boolean>>({});
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -134,7 +157,7 @@ export default function Page() {
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
-  const settingsDirtyRef = useRef<AppSettings>({ api_key: '', system_prompt: '' });
+  const settingsDirtyRef = useRef<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true });
   const settingsLoadedRef = useRef(false);
   useEffect(() => { settingsDirtyRef.current = settingsDirty; }, [settingsDirty]);
 
@@ -145,7 +168,7 @@ export default function Page() {
         const data: AppSettings = await res.json();
         console.log('GET /settings 响应:', data);
         setSettings(data);
-        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '' });
+        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled });
       } else {
         console.warn('GET /settings 失败:', res.status);
       }
@@ -182,6 +205,20 @@ export default function Page() {
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [contextMenu]);
+
+  // 轮询会话运行时状态（右侧边栏数据）
+  useEffect(() => {
+    if (!activeId) { setSessionState(null); return; }
+    const fetchState = async () => {
+      try {
+        const res = await fetch(`${API}/sessions/${activeId}/state`);
+        if (res.ok) setSessionState(await res.json());
+      } catch { /* ignore */ }
+    };
+    fetchState(); // 立即请求一次
+    const interval = setInterval(fetchState, loading ? 2000 : 5000);
+    return () => clearInterval(interval);
+  }, [activeId, loading]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, sid: string) => {
     e.preventDefault();
@@ -233,11 +270,12 @@ export default function Page() {
     setSettingsSaving(true);
     try {
       const cur = settingsDirtyRef.current;
-      const body: Record<string, string | null> = {};
+      const body: Record<string, string | null | boolean> = {};
       if (cur.api_key && cur.api_key.length > 0) {
         body.api_key = cur.api_key;
       }
       body.system_prompt = cur.system_prompt || null;
+      body.warmup_enabled = cur.warmup_enabled;
 
       const res = await fetch(`${API}/settings`, {
         method: 'PUT',
@@ -248,7 +286,7 @@ export default function Page() {
         const data: AppSettings = await res.json();
         console.log('PUT /settings 响应:', data);
         setSettings(data);
-        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '' });
+        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled });
       } else {
         console.warn('PUT /settings 失败:', res.status, await res.text().catch(() => ''));
       }
@@ -304,6 +342,7 @@ export default function Page() {
     if (!text || loading) return;
     setInput('');
     setRoundUsage(null);
+    setRightSidebarOpen(true); // 发送时自动打开右侧边栏
 
     const userMsg: Message = { role: 'user', content: text };
     const placeholder: Message = { role: 'assistant', content: '', isStreaming: true };
@@ -638,6 +677,14 @@ export default function Page() {
                   : '新会话'
                 }
               </span>
+              <button className="sidebar-toggle-right" onClick={() => setRightSidebarOpen(v => !v)} title="上下文面板">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="7" height="7" rx="1"/>
+                  <rect x="14" y="3" width="7" height="7" rx="1"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1"/>
+                  <rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+              </button>
             </div>
 
             {/* 消息区 */}
@@ -820,6 +867,70 @@ export default function Page() {
           </div>
         </div>
 
+        {/* ─── 右侧边栏 ─── */}
+        {rightSidebarOpen && (
+          <div className="sidebar sidebar-right">
+            <div className="sidebar-header">
+              <div className="sidebar-title">运行时视图</div>
+              <button className="sidebar-close-btn" onClick={() => setRightSidebarOpen(false)}>✕</button>
+            </div>
+            <div className="sidebar-scroll">
+
+              {/* ── 模型上下文 ── */}
+              <div className="right-panel-section">
+                <div className="right-panel-title">
+                  模型上下文 ({sessionState?.context.length ?? 0} 条消息)
+                </div>
+                {(sessionState?.context ?? []).map((msg, i) => {
+                  const collapsed = collapsedCtxCards[i] !== false;
+                  const label = msg.name
+                    ? `${msg.role} @${msg.name}`
+                    : msg.role;
+                  return (
+                    <div key={i} className={`ctx-card ${collapsed ? 'collapsed' : ''}`}>
+                      <div className="ctx-card-header" onClick={() => setCollapsedCtxCards(p => ({...p, [i]: !collapsed}))}>
+                        <span className="ctx-card-role-badge" data-role={msg.role}>{label}</span>
+                        <svg className="ctx-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          {collapsed ? <path d="M9 18l6-6-6-6"/> : <path d="M6 9l6 6 6-6"/>}
+                        </svg>
+                      </div>
+                      <div className="ctx-card-body">
+                        <pre className="ctx-card-content">{truncateContent(msg.content, 200)}</pre>
+                        {msg.reasoning_content && <pre className="ctx-card-reasoning">reasoning: {truncateContent(msg.reasoning_content, 100)}</pre>}
+                        {msg.tool_calls && msg.tool_calls.length > 0 && (
+                          <div className="ctx-card-toolcalls">
+                            {msg.tool_calls.map(tc => <code key={tc.id}>{tc.function.name}</code>)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {(!sessionState || sessionState.context.length === 0) && (
+                  <div className="right-empty">暂无上下文快照</div>
+                )}
+              </div>
+
+              {/* ── 待完成任务 ── */}
+              <div className="right-panel-section">
+                <div className="right-panel-title">
+                  待完成任务 ({(sessionState?.tasks ?? []).length})
+                </div>
+                {(sessionState?.tasks ?? []).map(t => (
+                  <div className="task-item" key={t.id}>
+                    <span className="task-id">{t.id}</span>
+                    <span className="task-desc">{t.description}</span>
+                  </div>
+                ))}
+                {(!sessionState || sessionState.tasks.length === 0) && (
+                  <div className="right-empty">无待办任务</div>
+                )}
+              </div>
+
+            </div>
+          </div>
+        )}
+
       </div>
 
       {/* ─── 设置遮罩 ─── */}
@@ -855,10 +966,24 @@ export default function Page() {
                   onChange={e => setSettingsDirty(prev => ({ ...prev, system_prompt: e.target.value }))}
                 />
               </div>
+              <div className="settings-field settings-toggle-row">
+                <label className="settings-label">Prefix Cache 预热</label>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={settingsDirty.warmup_enabled}
+                    onChange={e => setSettingsDirty(prev => ({ ...prev, warmup_enabled: e.target.checked }))}
+                  />
+                  <span className="toggle-slider"></span>
+                </label>
+                <span className="settings-toggle-hint">
+                  {settingsDirty.warmup_enabled ? '启用（~2s 延迟）' : '关闭'}
+                </span>
+              </div>
             </div>
             <div className="settings-modal-footer">
               <button className="settings-cancel-btn" onClick={() => {
-                setSettingsDirty({ api_key: '', system_prompt: settings.system_prompt || '' });
+                setSettingsDirty({ api_key: '', system_prompt: settings.system_prompt || '', warmup_enabled: settings.warmup_enabled });
                 setSettingsOpen(false);
               }}>取消</button>
               <button className="settings-save-btn" onClick={async () => {

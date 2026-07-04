@@ -1,6 +1,6 @@
 //! Agent 循环：LLM ↔ 工具调度 ↔ 流式输出
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -54,6 +54,7 @@ struct AccumTc {
 /// `tool_history` 跨多次 agent run 共享（同 session 的撤回链）。
 /// `checkpoint` 是 messages 的回退点索引，[0..checkpoint) 稳定不变。
 /// `session_dir` 是会话的上下文目录（.silences/sessions/{id}），用于读写 CONTEXT.md。
+/// `active_runs` 用于 agent 自然退出时清理停止标志（保持不因 SSE 断开而清理）。
 pub fn run_agent(
     llm: LlmClient,
     tools: Vec<ToolDef>,
@@ -64,14 +65,19 @@ pub fn run_agent(
     session_id: String,
     session_dir: Option<PathBuf>,
     tool_delay_ms: u64,
+    warmup_enabled: bool,
     stop_flag: Arc<AtomicBool>,
     queue: Arc<TaskQueue>,
+    agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
+    active_runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 ) -> ReceiverStream<AgentEvent> {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
 
     tokio::spawn(async move {
         // 发射 Session 事件
         if tx.send(AgentEvent::Session(session_id.clone())).await.is_err() {
+            let mut runs = active_runs.lock().await;
+            runs.remove(&session_id);
             return;
         }
 
@@ -88,10 +94,25 @@ pub fn run_agent(
         eprintln!("[agent] last_preserved_id={last_preserved_id} checkpoint={checkpoint}");
 
         for round in 0..usize::MAX {
+            // 快照当前上下文供 /state 端点查询（在 stop 检查前，确保 stop 时也能拿到最新状态）
+            {
+                let mut map = agent_contexts.lock().await;
+                map.insert(session_id.clone(), messages.clone());
+            }
+            // 持久化到 DB，刷新页面后仍可恢复
+            {
+                let db_lock = db.lock().await;
+                let _ = db_lock.save_context_snapshot(&session_id, &messages);
+            }
+
             // 检查外部停止信号
             if stop_flag.load(Ordering::Relaxed) {
                 eprintln!("[agent] 收到停止信号，退出 agent 循环");
                 let _ = tx.send(AgentEvent::Error("已停止".into())).await;
+                {
+                    let mut runs = active_runs.lock().await;
+                    runs.remove(&session_id);
+                }
                 return;
             }
             let api_tools = toolcall::build_api_tools(&tools);
@@ -104,6 +125,10 @@ pub fn run_agent(
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send(AgentEvent::Error(format!("LLM 调用失败: {e}"))).await;
+                    {
+                        let mut runs = active_runs.lock().await;
+                        runs.remove(&session_id);
+                    }
                     return;
                 }
             };
@@ -119,16 +144,14 @@ pub fn run_agent(
                 match stream.next_delta().await {
                     Ok(Some(StreamDelta::Text(t))) => {
                         full_text.push_str(&t);
-                        if tx.send(AgentEvent::Text(t)).await.is_err() {
+                        if !client_disconnected && tx.send(AgentEvent::Text(t)).await.is_err() {
                             client_disconnected = true;
-                            break;
                         }
                     }
                     Ok(Some(StreamDelta::Reasoning(r))) => {
                         full_reasoning.push_str(&r);
-                        if tx.send(AgentEvent::Reasoning(r)).await.is_err() {
+                        if !client_disconnected && tx.send(AgentEvent::Reasoning(r)).await.is_err() {
                             client_disconnected = true;
-                            break;
                         }
                     }
                     Ok(Some(StreamDelta::ToolCall { index, id, name, arguments })) => {
@@ -146,30 +169,13 @@ pub fn run_agent(
                         let _ = tx
                             .send(AgentEvent::Error(format!("流式读取失败: {e}")))
                             .await;
+                        {
+                            let mut runs = active_runs.lock().await;
+                            runs.remove(&session_id);
+                        }
                         return;
                     }
                 }
-            }
-
-            // 客户端断开：保存已积累的内容再退出
-            //
-            // 注意：如果断开时 LLM 正在流式输出 tool_call，这些 tool_call 尚未执行，
-            // 我们只保存已积累的文本/推理内容，不保存 tool_calls —— 否则会在 DB 中
-            // 留下孤立 tool_calls（有 tool_calls 但无对应 tool_result），
-            // 导致下次 API 请求因「工具调用没闭合」而返回 400。
-            if client_disconnected {
-                let (content, _tc, rc) = (
-                    std::mem::take(&mut full_text),
-                    std::mem::take(&mut tc_accums),
-                    std::mem::take(&mut full_reasoning),
-                );
-                let db_lock = db.lock().await;
-                if !content.is_empty() || !rc.is_empty() {
-                    let mut m = Message::new("assistant", &content);
-                    if !rc.is_empty() { m.reasoning_content = Some(rc); }
-                    let _ = db_lock.save_message(&session_id, &m);
-                }
-                return;
             }
 
             // 获取 usage
@@ -189,6 +195,7 @@ pub fn run_agent(
                         let db_lock = db.lock().await;
                         let _ = db_lock.save_message(&session_id, &final_asst);
                     }
+                    messages.push(final_asst); // 纳入内存，供退出快照捕获
                 }
 
                 // 保存用量
@@ -233,10 +240,12 @@ pub fn run_agent(
                         checkpoint = messages.len(); // 摘要进入稳定区，下次截断保留
 
                         // ⚡ 预热下一轮稳定前缀 [SILENCES.md, user, ...summaries]
-                        if let Err(e) = llm.warmup_prefix(&messages[..checkpoint], system.as_deref()).await {
-                            eprintln!("[agent] warmup 失败: {e}");
+                        if warmup_enabled {
+                            if let Err(e) = llm.warmup_prefix(&messages[..checkpoint], system.as_deref()).await {
+                                eprintln!("[agent] warmup 失败: {e}");
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await; // 等缓存稳定
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // 等缓存稳定
 
                         // 2. 刷新 B_delta / CONTEXT.md（name 用绝对路径）到内存和 DB
                         if let Some(ref session_dir) = session_dir {
@@ -269,6 +278,20 @@ pub fn run_agent(
                         let _ = tx.send(AgentEvent::ContextRollback).await;
                     }
                     continue;
+                }
+                // 正常退出前最后一次快照
+                {
+                    let mut map = agent_contexts.lock().await;
+                    map.insert(session_id.clone(), messages.clone());
+                }
+                {
+                    let db_lock = db.lock().await;
+                    let _ = db_lock.save_context_snapshot(&session_id, &messages);
+                }
+                // agent 正常退出，清理 active_runs 中的停止标志
+                {
+                    let mut runs = active_runs.lock().await;
+                    runs.remove(&session_id);
                 }
                 return;
             }
@@ -328,14 +351,18 @@ pub fn run_agent(
                     .unwrap_or_else(|| format!("call_{}", round));
 
                 // 先发射 pending 状态的 tool call
-                if tx
-                    .send(AgentEvent::ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        args: args_str.clone(),
-                        result: None,
-                    })
-                    .await.is_err() { return; }
+                if !client_disconnected
+                    && tx
+                        .send(AgentEvent::ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            args: args_str.clone(),
+                            result: None,
+                        })
+                        .await.is_err()
+                {
+                    client_disconnected = true;
+                }
 
                 let args: Value = match serde_json::from_str(args_str) {
                     Ok(v) => v,
@@ -381,14 +408,18 @@ pub fn run_agent(
                         }
 
                         // 发射完成状态的 tool call
-                        if tx
-                            .send(AgentEvent::ToolCall {
-                                id: id.clone(),
-                                name: name.clone(),
-                                args: args_str.clone(),
-                                result: Some(outcome.summary.clone()),
-                            })
-                            .await.is_err() { return; }
+                        if !client_disconnected
+                            && tx
+                                .send(AgentEvent::ToolCall {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    args: args_str.clone(),
+                                    result: Some(outcome.summary.clone()),
+                                })
+                                .await.is_err()
+                        {
+                            client_disconnected = true;
+                        }
 
                         if let Some(inv) = outcome.inverse {
                             let mut history = tool_history.lock().await;

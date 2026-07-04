@@ -60,6 +60,12 @@ impl Db {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS context_snapshots (
+                session_id  TEXT PRIMARY KEY,
+                messages    TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
             ",
         )?;
         // 迁移：旧表可能缺少的列
@@ -117,6 +123,7 @@ impl Db {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM messages WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM token_usage WHERE session_id = ?1", rusqlite::params![id])?;
+        self.conn.execute("DELETE FROM context_snapshots WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
@@ -177,6 +184,36 @@ impl Db {
         match result {
             Ok(Some(id)) => Ok(Some(id)),
             Ok(None) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ── 上下文快照 ──
+
+    /// 保存上下文快照（刷新页面后恢复用）
+    pub fn save_context_snapshot(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        let json = serde_json::to_string(messages)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO context_snapshots (session_id, messages, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id, json, now],
+        )?;
+        Ok(())
+    }
+
+    /// 读取持久化的上下文快照
+    pub fn get_context_snapshot(&self, session_id: &str) -> Result<Option<Vec<Message>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT messages FROM context_snapshots WHERE session_id = ?1",
+        )?;
+        let result = stmt.query_row(rusqlite::params![session_id], |row| {
+            let json: String = row.get(0)?;
+            serde_json::from_str(&json)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        });
+        match result {
+            Ok(msgs) => Ok(Some(msgs)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }

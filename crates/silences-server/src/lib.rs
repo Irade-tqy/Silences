@@ -22,7 +22,7 @@ use silences_agent::agent::{run_agent, AgentEvent};
 use silences_agent::queue::TaskQueue;
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
-use silences_core::{ChatRequest, Message, ViewMessage, Session, Settings, SettingsUpdate, SseEvent, messages_to_view};
+use silences_core::{ChatRequest, Message, Session, SessionState, Settings, SettingsUpdate, SseEvent, ViewMessage, messages_to_view};
 use silences_db::Db;
 use silences_llm::LlmClient;
 use tokio::sync::Mutex;
@@ -42,7 +42,7 @@ struct AppState {
     /// 每个会话的 agent 工具历史（用于 regret）
     agent_histories: Mutex<HashMap<String, Arc<Mutex<ToolHistory>>>>,
     /// 当前正在运行的 agent 停止标志
-    active_runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    active_runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// 最大上下文消息数（对话历史窗口）
     max_context_messages: usize,
     /// 当前设置的 system prompt（运行时可变）
@@ -51,25 +51,27 @@ struct AppState {
     project_root: Option<PathBuf>,
     /// 工具循环延迟（毫秒），每个 round 之间暂停
     tool_delay_ms: AtomicU64,
+    /// 是否启用 agent loop prefix cache 预热
+    warmup_enabled: AtomicBool,
     /// 动态任务优先队列
     task_queue: Arc<TaskQueue>,
+    /// 每个会话最后一次发给 LLM 的 messages 快照
+    agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
 }
 
-/// 流包装器：在 drop 时从 active_runs 中移除停止标志
+/// 流包装器：在 client 断开时不从 active_runs 中移除停止标志
+///（使得刷新页面后 stop 按钮仍能工作）
 struct CleanupStream<S> {
     inner: S,
-    state: Arc<AppState>,
     session_id: String,
 }
 
 impl<S> Drop for CleanupStream<S> {
     fn drop(&mut self) {
-        let state = self.state.clone();
-        let sid = self.session_id.clone();
-        tokio::spawn(async move {
-            let mut runs = state.active_runs.lock().await;
-            runs.remove(&sid);
-        });
+        // 不清理 active_runs —— SSE 断开不代表 agent 应该停止
+        // agent 自然退出时由 run_agent 自行清理，手动停止由 handle_stop_agent 清理
+        eprintln!("[CleanupStream] session={} SSE 连接已断开，agent 继续在后台运行",
+            &self.session_id[..8.min(self.session_id.len())]);
     }
 }
 
@@ -103,17 +105,23 @@ pub async fn serve(
     let tool_delay_ms = db.get_setting("tool_delay_ms").ok().flatten()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let warmup_enabled = db.get_setting("warmup_enabled").ok().flatten()
+        .and_then(|s| s.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true);
 
     let state = Arc::new(AppState {
         llm,
         db: Arc::new(Mutex::new(db)),
         agent_histories: Mutex::new(HashMap::new()),
-        active_runs: Mutex::new(HashMap::new()),
+        active_runs: Arc::new(Mutex::new(HashMap::new())),
         max_context_messages,
         system_prompt: StdMutex::new(saved_system),
         project_root,
         tool_delay_ms: AtomicU64::new(tool_delay_ms),
+        warmup_enabled: AtomicBool::new(warmup_enabled),
         task_queue: Arc::new(TaskQueue::new()),
+        agent_contexts: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -121,6 +129,7 @@ pub async fn serve(
         .route("/sessions", get(handle_list_sessions))
         .route("/sessions/{id}/messages", get(handle_session_messages))
         .route("/sessions/{id}/usage", get(handle_session_usage))
+        .route("/sessions/{id}/state", get(handle_session_state))
         .route("/sessions/{id}/rename", put(handle_rename_session))
         .route("/sessions/{id}", delete(handle_delete_session))
         .route("/sessions/{id}/stop", post(handle_stop_agent))
@@ -249,6 +258,7 @@ async fn handle_chat(
     eprintln!("[chat] session={} 注册停止标志", &session_id[..8.min(session_id.len())]);
 
     // 启动 agent 循环（传入 session_dir 用于读写 CONTEXT.md）
+    let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
     let agent_stream = run_agent(
         state.llm.clone_for_agent(),
         tools,
@@ -259,17 +269,19 @@ async fn handle_chat(
         session_id.clone(),
         Some(ctx.session_dir.clone()),
         state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
+        warmup_enabled,
         stop_flag,
         state.task_queue.clone(),
+        state.agent_contexts.clone(),
+        state.active_runs.clone(),
     );
 
     // 将 AgentEvent 转换为 SSE Event
     let sse_stream = agent_to_sse(agent_stream, session_id.clone(), is_new_session);
 
-    // 包装流：结束时自动清理停止标志
+    // 包装流：SSE 断开时不清理 active_runs（agent 继续在后台运行）
     let sse_stream = CleanupStream {
         inner: sse_stream,
-        state: state.clone(),
         session_id: session_id.clone(),
     };
 
@@ -348,11 +360,13 @@ async fn handle_get_settings(
     });
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
     let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
-    eprintln!("[GET /settings] api_key={:?} system_prompt={:?} tool_delay_ms={}",
+    let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("[GET /settings] api_key={:?} system_prompt={:?} tool_delay_ms={} warmup_enabled={}",
         masked.as_deref().unwrap_or("(none)"),
         system_prompt.as_deref().unwrap_or("(none)"),
-        tool_delay_ms);
-    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms }))
+        tool_delay_ms,
+        warmup_enabled);
+    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled }))
 }
 
 /// 更新设置
@@ -401,6 +415,13 @@ async fn handle_put_settings(
         let _ = db.set_setting("tool_delay_ms", &delay.to_string());
         eprintln!("[PUT /settings] tool_delay_ms 已更新: {}ms", delay);
     }
+    // 更新 warmup 开关
+    if let Some(enabled) = update.warmup_enabled {
+        state.warmup_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let db = state.db.lock().await;
+        let _ = db.set_setting("warmup_enabled", &(enabled as u8).to_string());
+        eprintln!("[PUT /settings] warmup_enabled 已更新: {enabled}");
+    }
 
     // 返回当前设置
     let api_key = state.llm.api_key_snapshot();
@@ -413,7 +434,8 @@ async fn handle_put_settings(
     });
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
     let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
-    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms }))
+    let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled }))
 }
 
 /// 列出所有会话
@@ -452,6 +474,30 @@ async fn handle_session_messages(
     Ok(Json(messages_to_view(msgs)))
 }
 
+/// 获取会话当前运行时状态（上下文快照 + 任务队列）
+async fn handle_session_state(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionState>, (StatusCode, String)> {
+    let context = {
+        let map = state.agent_contexts.lock().await;
+        map.get(&id).cloned()
+    };
+    // memory 中没有则从 DB 读取（刷新页面后 fallback）
+    let context = match context {
+        Some(c) => c,
+        None => {
+            let db = state.db.lock().await;
+            db.get_context_snapshot(&id).map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+            })?.unwrap_or_default()
+        }
+    };
+    let tasks = state.task_queue.list();
+    eprintln!("[GET /sessions/{}/state] context={} tasks={}", &id[..8.min(id.len())], context.len(), tasks.len());
+    Ok(Json(SessionState { context, tasks }))
+}
+
 /// 重命名会话
 async fn handle_rename_session(
     State(state): State<Arc<AppState>>,
@@ -478,6 +524,9 @@ async fn handle_delete_session(
     // 清理 agent 历史
     let mut histories = state.agent_histories.lock().await;
     histories.remove(&id);
+    // 清理上下文快照
+    let mut ctx = state.agent_contexts.lock().await;
+    ctx.remove(&id);
     // 删除会话上下文文件
     if let Some(ref root) = state.project_root {
         silences_agent::context::delete_session_context(root, &id);

@@ -54,4 +54,11 @@ impl TaskQueue {
         let tasks = self.tasks.lock().unwrap();
         tasks.is_empty()
     }
+
+    /// 返回当前队列中所有任务（FIFO 顺序）
+    pub fn list(&self) -> Vec<TaskItem> {
+        let order = self.order.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap();
+        order.iter().filter_map(|id| tasks.get(id).cloned()).collect()
+    }
 }

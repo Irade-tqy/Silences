@@ -251,7 +251,12 @@ pub struct Settings {
     pub system_prompt: Option<String>,
     /// 每轮 tool loop 延迟（毫秒），用于调试慢速观察
     pub tool_delay_ms: u64,
+    /// 是否启用 agent loop 提示词预热（prefix cache 激活）
+    #[serde(default = "default_warmup")]
+    pub warmup_enabled: bool,
 }
+
+fn default_warmup() -> bool { true }
 
 /// 更新设置的请求体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,4 +266,16 @@ pub struct SettingsUpdate {
     /// 每轮 tool loop 延迟（毫秒），传递 0 或 None 表示不延迟
     #[serde(default)]
     pub tool_delay_ms: Option<u64>,
+    /// 是否启用 prefix cache 预热，None 表示不更新
+    #[serde(default)]
+    pub warmup_enabled: Option<bool>,
+}
+
+/// 当前会话运行时状态（后端计算，前端只负责渲染）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionState {
+    /// 最后一次 LLM 调用时发送的 messages 快照
+    pub context: Vec<Message>,
+    /// 当前任务队列中的待办任务
+    pub tasks: Vec<TaskItem>,
 }
