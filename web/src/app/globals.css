@@ -1164,6 +1164,7 @@ html, body {
   transition: transform var(--ds-duration) var(--ds-ease);
 }
 .ctx-card.collapsed .ctx-card-chevron { transform: rotate(-90deg); }
+.ctx-card.collapsed .ctx-card-body { display: none; }
 
 .ctx-card-body {
   padding: 0 10px 8px;

@@ -493,6 +493,27 @@ async fn handle_session_messages(
     Ok(Json(messages_to_view(msgs)))
 }
 
+/// 给上下文消息中的 tool result 填充 name（通过 tool_call_id 反向匹配函数名）
+fn enrich_tool_names(msgs: &mut [Message]) {
+    let mut tool_names: HashMap<String, String> = HashMap::new();
+    for msg in msgs.iter() {
+        if let Some(ref tc) = msg.tool_calls {
+            for call in tc {
+                tool_names.insert(call.id.clone(), call.function.name.clone());
+            }
+        }
+    }
+    for msg in msgs.iter_mut() {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                if let Some(name) = tool_names.get(id) {
+                    msg.name = Some(name.clone());
+                }
+            }
+        }
+    }
+}
+
 /// 获取会话当前运行时状态（上下文快照 + 任务队列）
 async fn handle_session_state(
     State(state): State<Arc<AppState>>,
@@ -503,7 +524,7 @@ async fn handle_session_state(
         map.get(&id).cloned()
     };
     // memory 中没有则从 DB 读取（刷新页面后 fallback）
-    let context = match context {
+    let mut context = match context {
         Some(c) => c,
         None => {
             let db = state.db.lock().await;
@@ -512,6 +533,8 @@ async fn handle_session_state(
             })?.unwrap_or_default()
         }
     };
+    // 给 tool result 填函数名，前端无需再计算
+    enrich_tool_names(&mut context);
     let tasks = state.task_queue.list();
     // 查询当前 agent 运行状态
     let status = {

@@ -940,9 +940,11 @@ export default function Page() {
                 </div>
                 {(sessionState?.context ?? []).map((msg, i) => {
                   const collapsed = collapsedCtxCards[i] !== false;
-                  const label = msg.name
-                    ? `${msg.role} @${msg.name}`
-                    : msg.role;
+                  const label = msg.tool_calls && msg.tool_calls.length > 0
+                    ? msg.tool_calls[0].function.name + (msg.tool_calls.length > 1 ? ` +${msg.tool_calls.length - 1}` : '')
+                    : msg.role === 'tool'
+                      ? msg.name || 'tool'
+                      : msg.name ? `${msg.role} @${msg.name}` : msg.role;
                   return (
                     <div key={i} className={`ctx-card ${collapsed ? 'collapsed' : ''}`}>
                       <div className="ctx-card-header" onClick={() => setCollapsedCtxCards(p => ({...p, [i]: !collapsed}))}>
