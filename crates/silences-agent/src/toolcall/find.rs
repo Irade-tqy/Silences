@@ -1,14 +1,19 @@
 //! find — 按文件名正则搜索
 
 use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
 
 use super::{expand_pattern, ToolDef, ToolOutcome};
+use silences_core::ToolLimits;
 
-pub fn tool() -> ToolDef {
+static FIND_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "find",
         description:
@@ -28,11 +33,14 @@ pub fn tool() -> ToolDef {
             "required": ["path", "pattern"],
             "additionalProperties": false
         }),
-        handler: Box::new(|args| Box::pin(execute(args))),
+        handler: Box::new(move |args| {
+            let cd = console_dir.clone();
+            Box::pin(execute(args, cd, limits))
+        }),
     }
 }
 
-async fn execute(args: Value) -> Result<ToolOutcome> {
+async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let re_pattern = expand_pattern(raw_pattern);
@@ -47,7 +55,7 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     search_dir(path, path, &re, &mut results);
 
     if results.is_empty() {
-        Ok(ToolOutcome {
+        return Ok(ToolOutcome {
             summary: format!("find: 在 {} 中无匹配 \"{}\"", path, raw_pattern),
             inverse: None,
         
@@ -56,11 +64,14 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         approval_pending: None,
             inject_messages: vec![],
             defer_rollback: false,
-        })
-    } else {
+        });
+    }
+
+    let total = results.len();
+    if total <= limits.find_max_shown_items {
         let header = format!("find \"{}\" in {}:\n", raw_pattern, path);
         let body = results.join("\n");
-        let footer = format!("\n── 共 {} 个匹配", results.len());
+        let footer = format!("\n── 共 {} 个匹配", total);
         Ok(ToolOutcome {
             summary: format!("{header}{body}{footer}"),
             inverse: None,
@@ -71,7 +82,46 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
             inject_messages: vec![],
             defer_rollback: false,
         })
+    } else {
+        let mut shown = Vec::new();
+        for r in &results[..limits.find_max_shown_items] {
+            shown.push(r.as_str());
+        }
+        let over = total - limits.find_max_shown_items;
+        let file_path = save_find_file(&console_dir, path, raw_pattern, &results);
+
+        let header = format!("find \"{}\" in {}:\n", raw_pattern, path);
+        let body = shown.join("\n");
+        Ok(ToolOutcome {
+            summary: format!(
+                "{}{}\n...以及 {} 个匹配（共 {} 个），完整输出: {}\n",
+                header, body, over, total, file_path
+            ),
+            inverse: None,
+        
+        rollback: false,
+        
+        approval_pending: None,
+            inject_messages: vec![],
+            defer_rollback: false,
+        })
     }
+}
+
+/// 保存完整搜索结果到 console 文件
+fn save_find_file(console_dir: &Option<PathBuf>, path: &str, pattern: &str, results: &[String]) -> String {
+    let dir = match console_dir {
+        Some(d) => d.clone(),
+        None => return "（未保存，无会话目录）".into(),
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let seq = FIND_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_path = dir.join(format!("find_{seq}.out"));
+    let header = format!("find \"{}\" in {}:\n", pattern, path);
+    let body = results.join("\n");
+    let footer = format!("\n── 共 {} 个匹配", results.len());
+    let _ = std::fs::write(&file_path, format!("{}{}{}", header, body, footer));
+    file_path.to_string_lossy().to_string()
 }
 
 /// 递归搜索目录，匹配文件名。跳过无法读取的目录。

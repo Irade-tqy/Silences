@@ -352,7 +352,7 @@ pub fn all_tools(
     // grep 等工具的 console 输出目录
     let console_dir = session_dir.as_ref().map(|d| d.join("console"));
     vec![
-        glance::tool(limits),
+        glance::tool(console_dir.clone(), limits),
         grep::tool(console_dir.clone(), limits),
         read::tool(read_tracker.clone()),
         raw_read::tool(read_tracker.clone()),
@@ -360,7 +360,7 @@ pub fn all_tools(
         edit::tool(),
         raw_edit::tool(),
         replace::tool(),
-        find::tool(),
+        find::tool(console_dir.clone(), limits),
         regret::tool(history),
         command::tool(console_dir, limits),
         trash::tool(),

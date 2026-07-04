@@ -1,7 +1,8 @@
 //! glance — 概览目录或文件信息
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -9,7 +10,9 @@ use serde_json::Value;
 use super::{read_file_robust, ToolDef, ToolOutcome};
 use silences_core::ToolLimits;
 
-pub fn tool(limits: ToolLimits) -> ToolDef {
+static GLANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "glance",
         description:
@@ -26,17 +29,31 @@ pub fn tool(limits: ToolLimits) -> ToolDef {
             "additionalProperties": false
         }),
         handler: Box::new(move |args| {
-            Box::pin(execute(args, limits))
+            let cd = console_dir.clone();
+            Box::pin(execute(args, cd, limits))
         }),
     }
 }
 
-async fn execute(args: Value, limits: ToolLimits) -> Result<ToolOutcome> {
+async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let meta = fs::metadata(path).context("路径不存在")?;
 
     let summary = if meta.is_dir() {
-        glance_dir(path)?
+        let (full_output, entry_count) = glance_dir(path)?;
+        if entry_count > limits.glance_max_shown_items {
+            let lines: Vec<&str> = full_output.lines().collect();
+            let header = lines[0];
+            let shown = lines[1..=limits.glance_max_shown_items.min(lines.len() - 1)].join("\n");
+            let over = entry_count - limits.glance_max_shown_items;
+            let file_path = save_glance_file(&console_dir, &full_output);
+            format!(
+                "{}\n{}\n...以及 {} 个未显示项（共 {} 项），完整输出: {}\n",
+                header, shown, over, entry_count, file_path
+            )
+        } else {
+            full_output
+        }
     } else {
         glance_file(path, limits)?
     };
@@ -51,15 +68,16 @@ async fn execute(args: Value, limits: ToolLimits) -> Result<ToolOutcome> {
     })
 }
 
-fn glance_dir(path: &str) -> Result<String> {
+fn glance_dir(path: &str) -> Result<(String, usize)> {
     let mut entries: Vec<_> = fs::read_dir(path)
         .context("读取目录失败")?
         .filter_map(|e| e.ok())
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
+    let total = entries.len();
     let mut lines = Vec::new();
-    lines.push(format!("[DIR] {} ({} 项):", path, entries.len()));
+    lines.push(format!("[DIR] {} ({} 项):", path, total));
 
     for entry in &entries {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -79,7 +97,7 @@ fn glance_dir(path: &str) -> Result<String> {
         }
     }
 
-    Ok(lines.join("\n"))
+    Ok((lines.join("\n"), total))
 }
 
 fn glance_file(path: &str, limits: ToolLimits) -> Result<String> {
@@ -106,6 +124,19 @@ fn glance_file(path: &str, limits: ToolLimits) -> Result<String> {
     }
 
     Ok(info)
+}
+
+/// 保存完整目录清单到 console 文件
+fn save_glance_file(console_dir: &Option<PathBuf>, content: &str) -> String {
+    let dir = match console_dir {
+        Some(d) => d.clone(),
+        None => return "（未保存，无会话目录）".into(),
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let seq = GLANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_path = dir.join(format!("glance_{seq}.out"));
+    let _ = std::fs::write(&file_path, content);
+    file_path.to_string_lossy().to_string()
 }
 
 /// 读取文件的开头连续注释行

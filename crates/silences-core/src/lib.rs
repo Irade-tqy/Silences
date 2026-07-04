@@ -232,6 +232,10 @@ pub struct ToolLimits {
     pub grep_max_shown_matches: usize,
     /// grep 匹配行上下各显示多少行作为上下文
     pub grep_context_lines: usize,
+    /// glance 目录模式下最多显示多少条目（超出后截断，完整内容存 console 文件）
+    pub glance_max_shown_items: usize,
+    /// find 最多显示多少匹配（超出后截断，完整内容存 console 文件）
+    pub find_max_shown_items: usize,
 }
 
 impl Default for ToolLimits {
@@ -242,6 +246,8 @@ impl Default for ToolLimits {
             glance_max_comment_lines: 20,
             grep_max_shown_matches: 8,
             grep_context_lines: 2,
+            glance_max_shown_items: 50,
+            find_max_shown_items: 50,
         }
     }
 }
