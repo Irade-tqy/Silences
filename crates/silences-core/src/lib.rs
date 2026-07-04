@@ -240,7 +240,7 @@ impl Default for ToolLimits {
             command_stdout_max_tok: 2000,
             command_stderr_max_tok: 1000,
             glance_max_comment_lines: 20,
-            grep_max_shown_matches: 20,
+            grep_max_shown_matches: 8,
             grep_context_lines: 2,
         }
     }
