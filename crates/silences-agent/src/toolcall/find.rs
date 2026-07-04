@@ -17,7 +17,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "find",
         description:
-            "按文件名正则表达式搜索指定目录下的文件。返回匹配文件的相对路径，按目录层级组织。将会跳过隐藏目录、node_modules、target。\nwhy: 需要快速定位文件名满足某种模式的文件时使用。\n提示: 反引号内为纯文本，可混写。如 `main.rs` 匹配字面 \"main.rs\"。",
+            "按文件名正则表达式搜索指定目录下的文件。返回匹配文件的相对路径，按目录层级组织。将会跳过隐藏目录、node_modules、target。\nwhy: 需要快速定位文件名满足某种模式的文件时使用。\n提示: 反引号内为纯文本，可混写。如 `main.rs` 匹配字面 \"main.rs\"。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {

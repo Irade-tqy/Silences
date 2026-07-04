@@ -14,7 +14,7 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
     ToolDef {
         name: "raw_read",
         description:
-            "读取文件原始内容，不做任何标准化。若文件为空返回提示。\nwhy: 需要查看文件的原始格式（原始换行符、Tab 等）时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文。",
+            "读取文件原始内容，不做任何标准化。若文件为空返回提示。\nwhy: 需要查看文件的原始格式（原始换行符、Tab 等）时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {

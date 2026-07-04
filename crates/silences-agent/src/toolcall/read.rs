@@ -17,7 +17,7 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
     ToolDef {
         name: "read",
         description:
-            "读取文件内容。\nwhy: 需要查看代码或文件的内容时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格展示。",
+            "读取文件内容。\nwhy: 需要查看代码或文件的内容时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格展示。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {

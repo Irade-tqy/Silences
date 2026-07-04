@@ -1,26 +1,22 @@
-//! write — 创建新文件或覆写已读过的文件
+//! write — 创建新文件或覆写已有文件
 //!
 //! 与 Claude Code 的 Write 一致：
 //! - 文件不存在时直接创建
-//! - 文件存在时要求先 read 后才允许覆写
+//! - 文件存在时直接覆写（有 regret 逆操作可恢复）
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use tokio::sync::Mutex;
 
-use super::{InverseOp, ReadTracker, ToolDef, ToolOutcome};
+use super::{InverseOp, ToolDef, ToolOutcome};
 
-pub fn tool(read_tracker: ReadTracker) -> ToolDef {
-    let tracker = read_tracker.clone();
+pub fn tool() -> ToolDef {
     ToolDef {
         name: "write",
         description:
-            "创建新文件或覆写已读过的文件。\nwhy: 需要生成新代码或修改已有文件时使用。\nhow: 覆写已存在文件前必须先 read 该文件。",
+            "创建新文件或覆写已有文件。\nwhy: 需要生成新代码或修改已有文件时使用。\nhow: 文件存在时直接覆写，可通过 regret 恢复原文。[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -36,33 +32,16 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
             "required": ["path", "content"],
             "additionalProperties": false
         }),
-        handler: Box::new(move |args| {
-            let rt = tracker.clone();
-            Box::pin(async move { execute(args, rt).await })
-        }),
+        handler: Box::new(|args| Box::pin(execute(args))),
     }
 }
 
-async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Result<ToolOutcome> {
+async fn execute(args: Value) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let content = args["content"].as_str().context("缺少 content 参数")?;
 
     // 记录覆写前的原文（用于逆操作恢复）
     let original = if Path::new(path).exists() {
-        // — 覆写已存在文件：必须先在 read 注册表中 —
-        let mut tracker = read_tracker.lock().await;
-        let canonical = std::path::absolute(path)
-            .ok()
-            .map(|p| p.to_string_lossy().replace('\\', "/").to_string())
-            .unwrap_or_else(|| path.to_string());
-
-        if !tracker.remove(&canonical) {
-            anyhow::bail!(
-                "文件已存在但未读取过: {}\n请先使用 read 工具读取该文件，确认内容后再进行覆写。",
-                path
-            );
-        }
-        drop(tracker);
         Some(fs::read_to_string(path).unwrap_or_default())
     } else {
         None

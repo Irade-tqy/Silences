@@ -280,12 +280,18 @@ pub fn auto_truncate(
             let tail_start = offsets[total - tail_tok].0;
             let tail_start = tail_start.max(head_end).min(content.len());
 
+            let head_lines = content[..head_end].lines().count();
+            let tail_line_start = content[..tail_start].lines().count().saturating_add(1);
+            let total_lines = content.lines().count();
+
             let truncated = format!(
-                "{}…\n[截断：文件较大 (~{} tok)，仅显示开头 {} tok + 结尾 {} tok]\n…{}",
+                "{}…\n[截断：文件较大 (~{} tok，共 {} 行)，显示 1~{} 行 + {}~{} 行]\n…{}",
                 &content[..head_end],
                 total,
-                head_tok,
-                tail_tok,
+                total_lines,
+                head_lines,
+                tail_line_start,
+                total_lines,
                 &content[tail_start..]
             );
             return (truncated, true);
@@ -306,12 +312,18 @@ pub fn auto_truncate(
         .floor_char_boundary(content.len().saturating_sub(tail))
         .max(head_end);
 
+    let head_lines = content[..head_end].lines().count();
+    let tail_line_start = content[..tail_start].lines().count().saturating_add(1);
+    let total_lines = content.lines().count();
+
     let truncated = format!(
-        "{}…\n[截断：文件较大 (~{}B)，仅显示开头 ~{}tok + 结尾 ~{}tok]\n…{}",
+        "{}…\n[截断：文件较大 (~{}B，共 {} 行)，显示 1~{} 行 + {}~{} 行]\n…{}",
         &content[..head_end],
         content.len(),
-        head_tok,
-        tail_tok,
+        total_lines,
+        head_lines,
+        tail_line_start,
+        total_lines,
         &content[tail_start..]
     );
 
@@ -356,7 +368,7 @@ pub fn all_tools(
         grep::tool(console_dir.clone(), limits),
         read::tool(read_tracker.clone()),
         raw_read::tool(read_tracker.clone()),
-        write::tool(read_tracker),
+        write::tool(),
         edit::tool(),
         raw_edit::tool(),
         replace::tool(),

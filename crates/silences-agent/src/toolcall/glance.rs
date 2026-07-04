@@ -16,7 +16,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "glance",
         description:
-            "获取指定目录的一级子项概览或单个文件的信息。返回名称、文本文件行数和开头连续注释行的内容。\nwhy: 用于探索项目结构，了解代码库布局。",
+            "获取指定目录的一级子项概览或单个文件的信息。返回名称、文本文件行数和开头连续注释行的内容。\nwhy: 用于探索项目结构，了解代码库布局。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -107,20 +107,49 @@ fn glance_file(path: &str, limits: ToolLimits) -> Result<String> {
     let line_count = content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
 
     let max_lines = limits.glance_max_comment_lines;
-    let comment_hint = if let Some(ref c) = content {
-        leading_comment_lines(c, max_lines)
+    let preview = if let Some(ref c) = content {
+        let hint = leading_comment_lines(c, max_lines);
+        match hint {
+            Some(comments) if comments.lines().count() >= 3 => {
+                Some(format!("开头注释:\n{}", comments))
+            }
+            Some(comments) => {
+                // 注释不足 3 行：回退显示前 3 行非空内容
+                let preview: Vec<&str> = c.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .collect();
+                let mut fallback = format!("开头注释:\n{}", comments);
+                if !preview.is_empty() {
+                    fallback.push_str(&format!("\n[文件前 {} 行内容]:\n{}", preview.len(), preview.join("\n")));
+                }
+                Some(fallback)
+            }
+            None => {
+                // 无注释行：回退显示前 3 行非空内容
+                let preview: Vec<&str> = c.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .collect();
+                if !preview.is_empty() {
+                    Some(format!("[文件前 {} 行内容]:\n{}", preview.len(), preview.join("\n")))
+                } else {
+                    None
+                }
+            }
+        }
     } else {
         None
     };
 
     let mut info = format!("[FILE] {} ({} bytes, {} 行)", path, size, line_count);
-    if let Some(ref hint) = comment_hint {
-        info.push_str(&format!("\n开头注释:\n{}", hint));
+    if let Some(ref p) = preview {
+        info.push_str(&format!("\n{}", p));
     }
 
     // 文件行数多时提示用 read 读全文
     if line_count > 500 {
-        info.push_str(&format!("\n[提示] 文件共 {} 行，仅显示头部注释。如需完整内容请使用 read 工具。", line_count));
+        info.push_str(&format!("\n[提示] 文件共 {} 行，仅显示文件开头。如需完整内容请使用 read 工具。", line_count));
     }
 
     Ok(info)

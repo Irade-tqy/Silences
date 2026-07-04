@@ -23,7 +23,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "grep",
         description:
-            "在指定路径下搜索正则表达式匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名，grep 不会猜测扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\n提示: 反引号内的内容自动转义为纯文本，可与正则混写。如 `fn main()`*\n 匹配 \"fn main()\" 后跟正则 *\\n。\\` 在反引号内表示字面反引号。\n反例: 不要不加 extensions，否则会报错。",
+            "在指定路径下搜索正则表达式匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名，grep 不会猜测扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\n提示: 反引号内的内容自动转义为纯文本，可与正则混写。如 `fn main()`*\n 匹配 \"fn main()\" 后跟正则 *\\n。\\` 在反引号内表示字面反引号。\n反例: 不要不加 extensions，否则会报错。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -39,6 +39,12 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "**必填**。要搜索的文件扩展名，不含点号。例如 [\"rs\",\"ts\",\"tsx\"]。只搜这些扩展名的文件。"
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20,
+                    "description": "匹配行上下各显示多少行上下文（可选，默认 2）。调大以查看函数签名或闭合括号。"
                 }
             },
             "required": ["path", "pattern", "extensions"],
@@ -67,14 +73,19 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let re_pattern = expand_pattern(raw_pattern);
     let re = Regex::new(&re_pattern).context("正则表达式无效")?;
 
+    let ctx_lines = args.get("context_lines")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(limits.grep_context_lines);
+
     let meta = fs::metadata(path).context("路径不存在")?;
 
     // (格式化输出, 该文件内的匹配条数)
     let mut results: Vec<(String, usize)> = Vec::new();
     if meta.is_dir() {
-        search_dir(path, &re, &extensions, &mut results, limits.grep_context_lines)?;
+        search_dir(path, &re, &extensions, &mut results, ctx_lines)?;
     } else {
-        search_file(path, &re, &mut results, limits.grep_context_lines)?;
+        search_file(path, &re, &mut results, ctx_lines)?;
     }
 
     if results.is_empty() {

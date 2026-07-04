@@ -83,7 +83,7 @@ async fn test_glance_not_found() {
 async fn test_grep_found() {
     let dir = setup_test_dir("grep-found");
     let path = dir.to_string_lossy().to_string();
-    let result = call("grep", serde_json::json!({"path": path, "pattern": "hello"}))
+    let result = call("grep", serde_json::json!({"path": path, "pattern": "hello", "extensions": ["rs","py"]}))
         .await
         .unwrap();
     assert!(result.summary.contains("hello"));
@@ -94,7 +94,7 @@ async fn test_grep_found() {
 async fn test_grep_not_found() {
     let dir = setup_test_dir("grep-nf");
     let path = dir.to_string_lossy().to_string();
-    let result = call("grep", serde_json::json!({"path": path, "pattern": "ZZZZNOTFOUND"}))
+    let result = call("grep", serde_json::json!({"path": path, "pattern": "ZZZZNOTFOUND", "extensions": ["rs","py"]}))
         .await
         .unwrap();
     assert!(result.summary.contains("无匹配"));
@@ -139,14 +139,14 @@ async fn test_read_with_range() {
 }
 
 // ============================================================
-// create
+// create / write
 // ============================================================
 
 #[tokio::test]
 async fn test_create_file() {
     let dir = setup_test_dir("create-file");
     let path = dir.join("new_file.rs").to_string_lossy().to_string();
-    let result = call("create", serde_json::json!({"path": path, "content": "fn new() {}"}))
+    let result = call("write", serde_json::json!({"path": path, "content": "fn new() {}"}))
         .await
         .unwrap();
     assert!(result.summary.contains("new_file.rs"));
@@ -163,9 +163,17 @@ async fn test_create_file() {
 async fn test_create_existing() {
     let dir = setup_test_dir("create-exist");
     let path = dir.join("hello.rs").to_string_lossy().to_string();
-    let result = call("create", serde_json::json!({"path": path, "content": "x"}))
+    let result = call("write", serde_json::json!({"path": path, "content": "x"}))
         .await;
-    assert!(result.is_err());
+    // 写前检查已移除，覆写已有文件应成功
+    assert!(result.is_ok());
+    let outcome = result.unwrap();
+    assert!(outcome.summary.contains("hello.rs"));
+    // 验证逆操作可以恢复原文
+    let inverse = outcome.inverse.unwrap();
+    inverse.apply().unwrap();
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("hello world"));
 }
 
 // ============================================================
@@ -251,7 +259,7 @@ async fn test_replace_in_file() {
     )
     .await
     .unwrap();
-    assert!(result.summary.contains("REPLACED"));
+    assert!(result.summary.contains("替换完成") || result.summary.contains("批量替换"));
     assert!(result.inverse.is_some());
 }
 
@@ -326,7 +334,7 @@ async fn test_regret_undo_create() {
     let path = dir.join("undo_test.txt").to_string_lossy().to_string();
     let outcome = toolcall::execute_tool(
         &tools,
-        "create",
+        "write",
         serde_json::json!({"path": path, "content": "test content"}),
     )
     .await
@@ -336,7 +344,7 @@ async fn test_regret_undo_create() {
     // 记录逆操作
     {
         let mut h = history.lock().await;
-        h.push("create", outcome.inverse.unwrap());
+        h.push("write", outcome.inverse.unwrap());
     }
 
     // 调用 regret（还原 create）

@@ -11,7 +11,7 @@ use crate::queue::TaskQueue;
 pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
     ToolDef {
         name: "add_task",
-        description: "向动态任务队列添加一个新任务。\nwhy: 发现需要做的事情但当前不紧急时，先入队稍后自动处理。\nhow: 提供任务 id（唯一标识）和描述。",
+        description: "向动态任务队列添加一个新任务。\nwhy: 发现需要做的事情但当前不紧急时，先入队稍后自动处理。\nhow: 提供任务 id（唯一标识）和描述。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
