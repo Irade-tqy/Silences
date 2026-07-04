@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let model = env::var("DEEPSEEK_MODEL")
         .unwrap_or_else(|_| "deepseek-v4-flash".to_string());
     let bind = env::var("SILENCES_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:1030".to_string());
+        .unwrap_or_else(|_| "0.0.0.0:1030".to_string());
 
     let mut llm = LlmClient::new(api_key, base_url, model);
     // 调试日志目录（默认项目根目录，写入 api_debug.json）
