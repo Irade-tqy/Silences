@@ -3,13 +3,23 @@
 //! Windows 的 PowerShell 输出通常是系统活动代码页编码（如中文 GBK、日文 Shift_JIS），
 //! 而非 UTF-8。此模块会自动检测编码并转换为 UTF-8，确保模型正确接收含非 ASCII
 //! 字符的命令输出。
+//!
+//! 输出超过阈值时摘要截断，完整输出写入 console 目录供模型读取。
 
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{ToolDef, ToolOutcome};
+
+static CMD_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 截断阈值
+const STDOUT_MAX: usize = 4000;
+const STDERR_MAX: usize = 2000;
 
 /// 尝试将字节数据解码为 UTF-8。
 ///
@@ -44,11 +54,11 @@ fn decode_to_utf8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
-pub fn tool() -> ToolDef {
+pub fn tool(console_dir: Option<PathBuf>) -> ToolDef {
     ToolDef {
         name: "command",
         description:
-            "what: 在 PowerShell 中执行命令。\nwhy: 需要运行脚本、编译、测试等操作时使用。\nhow: 如删除请用 trash 代替。",
+            "what: 在 PowerShell 中执行命令。\nwhy: 需要运行脚本、编译、测试等操作时使用。\nhow: 如删除请用 trash 代替。\n注意: 输出超过阈值会截断并保存完整版到 console 目录，可按需 read。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -64,11 +74,14 @@ pub fn tool() -> ToolDef {
             "required": ["command"],
             "additionalProperties": false
         }),
-        handler: Box::new(|args| Box::pin(execute(args))),
+        handler: Box::new(move |args| {
+            let cd = console_dir.clone();
+            Box::pin(execute(args, cd))
+        }),
     }
 }
 
-async fn execute(args: Value) -> Result<ToolOutcome> {
+async fn execute(args: Value, console_dir: Option<PathBuf>) -> Result<ToolOutcome> {
     let command = args["command"].as_str().context("缺少 command 参数")?;
     let work_dir = args["work_dir"].as_str().map(|s| s.to_string());
 
@@ -86,26 +99,60 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     let stdout = decode_to_utf8(&output.stdout);
     let stderr = decode_to_utf8(&output.stderr);
 
-    // 截断输出防止太大
-    let truncate = |s: &str, max: usize| -> String {
-        if s.len() > max {
-            format!("{}...\n[已截断, 共 {} 字符]", &s[..max], s.len())
-        } else {
-            s.to_string()
-        }
-    };
+    let exit_code = output.status.code();
 
     let mut summary = format!("$ {}\n", command);
+
+    let stdout_truncated = stdout.len() > STDOUT_MAX;
+    let stderr_truncated = stderr.len() > STDERR_MAX;
+
     if !stdout.is_empty() {
-        summary.push_str(&truncate(&stdout, 4000));
+        if stdout_truncated {
+            let seq = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let truncated_summary = format!("{}...\n[已截断, 共 {} 字符]", &stdout[..STDOUT_MAX], stdout.len());
+            summary.push_str(&truncated_summary);
+
+            // 保存完整 stdout
+            if let Some(ref cd) = console_dir {
+                let _ = std::fs::create_dir_all(cd);
+                let out_path = cd.join(format!("cmd_{seq}_stdout.out"));
+                if let Err(e) = std::fs::write(&out_path, &stdout) {
+                    summary.push_str(&format!("\n[警告: 完整输出写入失败 {e}]"));
+                } else {
+                    summary.push_str(&format!("\n[完整输出: {}]", out_path.display()));
+                }
+            } else {
+                summary.push_str("\n[完整输出未保存, 请缩小命令范围]");
+            }
+        } else {
+            summary.push_str(&stdout);
+        }
     }
+
     if !stderr.is_empty() {
         if !stdout.is_empty() {
             summary.push('\n');
         }
-        summary.push_str(&format!("stderr:\n{}", truncate(&stderr, 2000)));
+        summary.push_str("stderr:\n");
+        if stderr_truncated {
+            let seq = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let truncated_summary = format!("{}...\n[已截断, 共 {} 字符]", &stderr[..STDERR_MAX], stderr.len());
+            summary.push_str(&truncated_summary);
+
+            if let Some(ref cd) = console_dir {
+                let out_path = cd.join(format!("cmd_{seq}_stderr.out"));
+                if let Err(e) = std::fs::write(&out_path, &stderr) {
+                    summary.push_str(&format!("\n[警告: 完整 stderr 写入失败 {e}]"));
+                } else {
+                    summary.push_str(&format!("\n[完整 stderr: {}]", out_path.display()));
+                }
+            }
+        } else {
+            summary.push_str(&stderr);
+        }
     }
-    if let Some(code) = output.status.code() {
+
+    if let Some(code) = exit_code {
         summary.push_str(&format!("\n退出码: {}", code));
     }
 
@@ -113,9 +160,8 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         summary,
         inverse: None, // command 不可撤销
         rollback: false,
-    
         approval_pending: None,
         inject_messages: vec![],
-            defer_rollback: false,
-        })
+        defer_rollback: false,
+    })
 }

@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let model = env::var("DEEPSEEK_MODEL")
         .unwrap_or_else(|_| "deepseek-v4-flash".to_string());
     let bind = env::var("SILENCES_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:0412".to_string());
+        .unwrap_or_else(|_| "127.0.0.1:1030".to_string());
     let max_context = env::var("SILENCES_MAX_CONTEXT")
         .ok()
         .and_then(|v| v.parse().ok())

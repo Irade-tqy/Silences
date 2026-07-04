@@ -19,6 +19,7 @@ pub mod end_task;
 pub mod add_task;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -317,10 +318,11 @@ pub fn auto_truncate(
 }
 
 /// 注册所有工具
-pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, queue: Arc<TaskQueue>) -> Vec<ToolDef> {
+/// `console_dir` 为可选路径，工具将完整输出写入该目录供模型按需读取（如 grep 截断后）。
+pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, queue: Arc<TaskQueue>, console_dir: Option<PathBuf>) -> Vec<ToolDef> {
     vec![
         glance::tool(),
-        grep::tool(),
+        grep::tool(console_dir.clone()),
         read::tool(read_tracker.clone()),
         raw_read::tool(read_tracker.clone()),
         write::tool(read_tracker),
@@ -329,7 +331,7 @@ pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, qu
         replace::tool(),
         find::tool(),
         regret::tool(history),
-        command::tool(),
+        command::tool(console_dir),
         trash::tool(),
         start_task::tool(queue.clone()),
         end_task::tool(queue.clone()),

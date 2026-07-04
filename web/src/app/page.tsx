@@ -57,10 +57,6 @@ interface SessionState {
   status: string; // "idle" | "running" | "paused"
 }
 
-// ─── Config ──────────────────────────────────────────────
-
-const API = process.env.NEXT_PUBLIC_SILENCES_API || 'http://127.0.0.1:0412';
-
 function fmtTime(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => n.toString().padStart(2, '0');
@@ -134,8 +130,18 @@ export default function Page() {
   const msgEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const thinkingIdxRef = useRef<number | null>(null);
+  const [apiBase, setApiBase] = useState('');
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
+  // 动态发现后端 API 地址
+  useEffect(() => {
+    const hostname = window.location.hostname;
+    const defaultUrl = `http://${hostname}:1030`;
+    fetch(`${defaultUrl}/api/config`)
+      .then(res => { if (res.ok) return res.json(); throw new Error(); })
+      .then(config => setApiBase(`http://${config.api_host}:1030`))
+      .catch(() => setApiBase(defaultUrl));
+  }, []);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -152,10 +158,10 @@ export default function Page() {
 
   const loadSessions = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/sessions`);
+      const res = await fetch(`${apiBase}/sessions`);
       if (res.ok) setSessions(await res.json());
     } catch { /* ignore */ }
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
@@ -165,7 +171,7 @@ export default function Page() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/settings?t=${Date.now()}`);
+      const res = await fetch(`${apiBase}/settings?t=${Date.now()}`);
       if (res.ok) {
         const data: AppSettings = await res.json();
         console.log('GET /settings 响应:', data);
@@ -179,7 +185,7 @@ export default function Page() {
     } catch (e) {
       console.warn('加载设置失败:', e);
     }
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => { loadSettings(); }, [loadSettings]);
 
@@ -214,14 +220,14 @@ export default function Page() {
     if (!activeId) { setSessionState(null); return; }
     const fetchState = async () => {
       try {
-        const res = await fetch(`${API}/sessions/${activeId}/state`);
+        const res = await fetch(`${apiBase}/sessions/${activeId}/state`);
         if (res.ok) setSessionState(await res.json());
       } catch { /* ignore */ }
     };
     fetchState(); // 立即请求一次
     const interval = setInterval(fetchState, loading ? 2000 : 5000);
     return () => clearInterval(interval);
-  }, [activeId, loading]);
+  }, [activeId, loading, apiBase]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, sid: string) => {
     e.preventDefault();
@@ -243,14 +249,14 @@ export default function Page() {
 
   const handleRenameConfirm = useCallback(async () => {
     if (!renameId) return;
-    await fetch(`${API}/sessions/${renameId}/rename`, {
+    await fetch(`${apiBase}/sessions/${renameId}/rename`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: renameValue }),
     });
     setRenameId(null);
     loadSessions();
-  }, [renameId, renameValue, loadSessions]);
+  }, [renameId, renameValue, loadSessions, apiBase]);
 
   const handleDeleteClick = useCallback((sid: string) => {
     setContextMenu(null);
@@ -259,7 +265,7 @@ export default function Page() {
 
   const handleDeleteConfirm = useCallback(async () => {
     if (!deleteConfirmId) return;
-    await fetch(`${API}/sessions/${deleteConfirmId}`, { method: 'DELETE' });
+    await fetch(`${apiBase}/sessions/${deleteConfirmId}`, { method: 'DELETE' });
     if (activeId === deleteConfirmId) {
       setActiveId(null);
       setMessages([]);
@@ -267,7 +273,7 @@ export default function Page() {
     }
     setDeleteConfirmId(null);
     loadSessions();
-  }, [deleteConfirmId, activeId, loadSessions]);
+  }, [deleteConfirmId, activeId, loadSessions, apiBase]);
 
   const saveSettings = useCallback(async () => {
     setSettingsSaving(true);
@@ -280,7 +286,7 @@ export default function Page() {
       body.system_prompt = cur.system_prompt || null;
       body.warmup_enabled = cur.warmup_enabled;
 
-      const res = await fetch(`${API}/settings`, {
+      const res = await fetch(`${apiBase}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -297,7 +303,7 @@ export default function Page() {
       console.warn('保存设置失败:', e);
     }
     setSettingsSaving(false);
-  }, []); // 通过 ref 读取最新值，无需依赖 settingsDirty
+  }, [apiBase]); // 通过 ref 读取最新值，无需依赖 settingsDirty
 
   const selectSession = useCallback(async (id: string) => {
     if (loading) return;
@@ -309,8 +315,8 @@ export default function Page() {
 
     try {
       const [msgRes, usageRes] = await Promise.all([
-        fetch(`${API}/sessions/${id}/messages`),
-        fetch(`${API}/sessions/${id}/usage`),
+        fetch(`${apiBase}/sessions/${id}/messages`),
+        fetch(`${apiBase}/sessions/${id}/usage`),
       ]);
       if (msgRes.ok) {
         const data: {
@@ -338,7 +344,7 @@ export default function Page() {
         if (usage) setTotalUsage(usage);
       }
     } catch { /* ignore */ }
-  }, [loading]);
+  }, [loading, apiBase]);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
@@ -359,7 +365,7 @@ export default function Page() {
     abortRef.current = controller;
 
     try {
-      const res = await fetch(`${API}/chat`, {
+      const res = await fetch(`${apiBase}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -498,12 +504,12 @@ export default function Page() {
       setPaused(false);
       abortRef.current = null;
     }
-  }, [input, loading, activeId, loadSessions]);
+  }, [input, loading, activeId, loadSessions, apiBase]);
 
   const stopGeneration = useCallback(() => {
     // 先通知后端停止 agent 运行（统一 set_state 端点）
     if (activeId) {
-      fetch(`${API}/sessions/${activeId}/set_state`, {
+      fetch(`${apiBase}/sessions/${activeId}/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' }),
@@ -517,29 +523,28 @@ export default function Page() {
       ));
     }
     setPaused(false);
-  }, [activeId]);
+  }, [activeId, apiBase]);
 
   const pauseGeneration = useCallback(() => {
     if (activeId) {
-      fetch(`${API}/sessions/${activeId}/set_state`, {
+      fetch(`${apiBase}/sessions/${activeId}/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'pause' }),
       }).catch(() => {});
     }
+  }, [activeId, apiBase]);
     // 不断开 SSE——agent 暂停后无数据，resume 后继续推流
-  }, [activeId]);
-
   const resumeGeneration = useCallback(() => {
     if (activeId) {
-      fetch(`${API}/sessions/${activeId}/set_state`, {
+      fetch(`${apiBase}/sessions/${activeId}/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'resume' }),
       }).catch(() => {});
     }
+  }, [activeId, apiBase]);
     // agent 恢复后继续通过同一 SSE 连接推流
-  }, [activeId]);
 
   // 提取 SSE 流处理为独立函数（chat 和重连复用）
   const startSSEStream = useCallback(async (res: Response, sid: string) => {

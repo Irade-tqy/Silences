@@ -4,6 +4,7 @@
 //! 以 SSE 流式返回文本回复 + tool call 摘要 + token 用量 + 会话 ID。
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -245,9 +246,11 @@ async fn handle_chat(
             .clone()  // 克隆 Arc
     };
 
-    // 注册工具（每个会话独立的读记录）
+    // 注册工具（每个会话独立的读记录 + console 目录）
     let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
-    let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker, state.task_queue.clone());
+    let console_dir = Some(ctx.session_dir.join("console"));
+    let _ = fs::create_dir_all(console_dir.as_ref().unwrap()); // 确保目录存在
+    let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker, state.task_queue.clone(), console_dir);
 
     // 如果该 session 已有活跃运行，先停止旧标志
     {
