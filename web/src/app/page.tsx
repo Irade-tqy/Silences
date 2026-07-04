@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Markdown from '@/components/Markdown';
 
@@ -130,17 +130,13 @@ export default function Page() {
   const msgEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const thinkingIdxRef = useRef<number | null>(null);
-  const [apiBase, setApiBase] = useState('');
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
-  // 动态发现后端 API 地址
-  useEffect(() => {
-    const hostname = window.location.hostname;
-    const defaultUrl = `http://${hostname}:1030`;
-    fetch(`${defaultUrl}/api/config`)
-      .then(res => { if (res.ok) return res.json(); throw new Error(); })
-      .then(config => setApiBase(`http://${config.api_host}:1030`))
-      .catch(() => setApiBase(defaultUrl));
+  // apiBase — 从环境变量取后端地址；不设则 fallback 到当前页面 hostname
+  const apiBase = useMemo(() => {
+    const host = process.env.NEXT_PUBLIC_API_HOST ||
+      (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
+    return `http://${host}:1030`;
   }, []);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
