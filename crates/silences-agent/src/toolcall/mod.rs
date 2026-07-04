@@ -27,6 +27,7 @@ use crate::queue::TaskQueue;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use silences_core::ToolLimits;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
@@ -211,7 +212,7 @@ pub fn read_file_robust(path: &str) -> Result<String, anyhow::Error> {
 
 /// 惰性加载 DeepSeek tokenizer。
 /// 搜索顺序：SILENCES_TOKENIZER_PATH 环境变量 → 本项目已知相对路径。
-fn get_tokenizer() -> Option<&'static Tokenizer> {
+pub(super) fn get_tokenizer() -> Option<&'static Tokenizer> {
     static TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
     TOKENIZER
         .get_or_init(|| {
@@ -317,11 +318,41 @@ pub fn auto_truncate(
     (truncated, true)
 }
 
+/// 截断字符串到前 max_tok 个 token。
+/// 使用 DeepSeek tokenizer 精确计数；回退字节估算（1 tok ≈ 4 字节）。
+/// 返回（截断后的字符串, 是否被截断）。
+pub(super) fn truncate_head_tok(content: &str, max_tok: usize) -> (String, bool) {
+    if let Some(tok) = get_tokenizer() {
+        if let Ok(enc) = tok.encode(content, true) {
+            if enc.len() <= max_tok {
+                return (content.to_owned(), false);
+            }
+            let offsets = enc.get_offsets();
+            let end = offsets[max_tok.saturating_sub(1)].1.min(content.len());
+            return (content[..end].to_owned(), true);
+        }
+    }
+    // 回退：字节估算
+    let max_bytes = max_tok * 4;
+    if content.len() <= max_bytes {
+        return (content.to_owned(), false);
+    }
+    let end = content.floor_char_boundary(max_bytes.min(content.len()));
+    (content[..end].to_owned(), true)
+}
+
 /// 注册所有工具
-/// `console_dir` 为可选路径，工具将完整输出写入该目录供模型按需读取（如 grep 截断后）。
-pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, queue: Arc<TaskQueue>, console_dir: Option<PathBuf>) -> Vec<ToolDef> {
+pub fn all_tools(
+    history: Arc<Mutex<ToolHistory>>,
+    read_tracker: ReadTracker,
+    queue: Arc<TaskQueue>,
+    session_dir: Option<PathBuf>,
+    limits: ToolLimits,
+) -> Vec<ToolDef> {
+    // grep 等工具的 console 输出目录
+    let console_dir = session_dir.as_ref().map(|d| d.join("console"));
     vec![
-        glance::tool(),
+        glance::tool(limits),
         grep::tool(console_dir.clone()),
         read::tool(read_tracker.clone()),
         raw_read::tool(read_tracker.clone()),
@@ -331,12 +362,11 @@ pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, qu
         replace::tool(),
         find::tool(),
         regret::tool(history),
-        command::tool(console_dir),
+        command::tool(console_dir, limits),
         trash::tool(),
         start_task::tool(queue.clone()),
         end_task::tool(queue.clone()),
         add_task::tool(queue),
-
     ]
 }
 

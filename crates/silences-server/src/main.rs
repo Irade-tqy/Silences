@@ -26,10 +26,6 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "deepseek-v4-flash".to_string());
     let bind = env::var("SILENCES_BIND")
         .unwrap_or_else(|_| "127.0.0.1:1030".to_string());
-    let max_context = env::var("SILENCES_MAX_CONTEXT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50);
 
     let mut llm = LlmClient::new(api_key, base_url, model);
     // 调试日志目录（默认项目根目录，写入 api_debug.json）
@@ -50,6 +46,6 @@ async fn main() -> Result<()> {
         .ok()
         .map(std::path::PathBuf::from);
 
-    silences_server::serve(llm, db, &bind, max_context, project_root).await?;
+    silences_server::serve(llm, db, &bind, project_root).await?;
     Ok(())
 }

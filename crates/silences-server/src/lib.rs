@@ -4,7 +4,6 @@
 //! 以 SSE 流式返回文本回复 + tool call 摘要 + token 用量 + 会话 ID。
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -44,8 +43,6 @@ struct AppState {
     agent_histories: Mutex<HashMap<String, Arc<Mutex<ToolHistory>>>>,
     /// 当前正在运行的 agent 运行标志（stop / pause）
     active_runs: Arc<Mutex<HashMap<String, Arc<RunFlags>>>>,
-    /// 最大上下文消息数（对话历史窗口）
-    max_context_messages: usize,
     /// 当前设置的 system prompt（运行时可变）
     system_prompt: StdMutex<Option<String>>,
     /// 项目根目录（用于读取 SILENCES.md / CONTEXT.md）
@@ -89,7 +86,6 @@ pub async fn serve(
     llm: LlmClient,
     db: Db,
     bind: &str,
-    max_context_messages: usize,
     project_root: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // 从 DB 加载已保存的 system prompt
@@ -116,7 +112,6 @@ pub async fn serve(
         db: Arc::new(Mutex::new(db)),
         agent_histories: Mutex::new(HashMap::new()),
         active_runs: Arc::new(Mutex::new(HashMap::new())),
-        max_context_messages,
         system_prompt: StdMutex::new(saved_system),
         project_root,
         tool_delay_ms: AtomicU64::new(tool_delay_ms),
@@ -186,15 +181,12 @@ async fn handle_chat(
         })?;
     }
 
-    // 加载历史消息（上下文窗口）
+    // 加载历史消息
     let history = {
         let db = state.db.lock().await;
-        let mut msgs = db.get_messages(&session_id).map_err(|e| {
+        let msgs = db.get_messages(&session_id).map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
         })?;
-        if msgs.len() > state.max_context_messages {
-            msgs = msgs[msgs.len() - state.max_context_messages..].to_vec();
-        }
         msgs
     };
 
@@ -248,9 +240,13 @@ async fn handle_chat(
 
     // 注册工具（每个会话独立的读记录 + console 目录）
     let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
-    let console_dir = Some(ctx.session_dir.join("console"));
-    let _ = fs::create_dir_all(console_dir.as_ref().unwrap()); // 确保目录存在
-    let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker, state.task_queue.clone(), console_dir);
+    let tools: Vec<ToolDef> = toolcall::all_tools(
+        tool_history.clone(),
+        read_tracker,
+        state.task_queue.clone(),
+        Some(ctx.session_dir.clone()),
+        Default::default(),
+    );
 
     // 如果该 session 已有活跃运行，先停止旧标志
     {

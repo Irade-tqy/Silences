@@ -56,12 +56,14 @@ pub fn init_session_context(project_root: &Path, session_id: &str) -> std::io::R
         .join(session_id);
     fs::create_dir_all(&session_dir)?;
 
-    // SILENCES.md：从 templates/SILENCES.md 复制
+    // SILENCES.md：从 templates/SILENCES.md 复制，替换占位符为实际路径
     let silences_path = session_dir.join("SILENCES.md");
     if !silences_path.exists() {
         let tpl = project_root.join("templates").join("SILENCES.md");
         if tpl.exists() {
-            fs::copy(tpl, &silences_path)?;
+            let content = std::fs::read_to_string(&tpl)?
+                .replace("{SilencesDataDirectory}", &session_dir.to_string_lossy());
+            std::fs::write(&silences_path, content)?;
         } else {
             fs::write(&silences_path, "")?;
         }

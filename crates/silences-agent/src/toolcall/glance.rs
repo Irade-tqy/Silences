@@ -7,8 +7,9 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{read_file_robust, ToolDef, ToolOutcome};
+use silences_core::ToolLimits;
 
-pub fn tool() -> ToolDef {
+pub fn tool(limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "glance",
         description:
@@ -24,29 +25,30 @@ pub fn tool() -> ToolDef {
             "required": ["path"],
             "additionalProperties": false
         }),
-        handler: Box::new(|args| Box::pin(execute(args))),
+        handler: Box::new(move |args| {
+            Box::pin(execute(args, limits))
+        }),
     }
 }
 
-async fn execute(args: Value) -> Result<ToolOutcome> {
+async fn execute(args: Value, limits: ToolLimits) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let meta = fs::metadata(path).context("路径不存在")?;
 
     let summary = if meta.is_dir() {
         glance_dir(path)?
     } else {
-        glance_file(path)?
+        glance_file(path, limits)?
     };
 
     Ok(ToolOutcome {
         summary,
         inverse: None,
         rollback: false,
-    
         approval_pending: None,
         inject_messages: vec![],
-            defer_rollback: false,
-        })
+        defer_rollback: false,
+    })
 }
 
 fn glance_dir(path: &str) -> Result<String> {
@@ -68,7 +70,6 @@ fn glance_dir(path: &str) -> Result<String> {
             lines.push(format!("  [DIR] {}/", name));
         } else {
             let size = meta.map(|m| m.len()).unwrap_or(0);
-            // 尝试读文件头部注释
             let comment_hint = read_leading_comments(&entry.path());
             if let Some(hint) = comment_hint {
                 lines.push(format!("  [FILE] {} ({} bytes) 开头: {}", name, size, hint));
@@ -81,21 +82,27 @@ fn glance_dir(path: &str) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn glance_file(path: &str) -> Result<String> {
+fn glance_file(path: &str, limits: ToolLimits) -> Result<String> {
     let meta = fs::metadata(path).context("读取文件信息失败")?;
     let size = meta.len();
     let content = read_file_robust(path).ok();
     let line_count = content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
 
+    let max_lines = limits.glance_max_comment_lines;
     let comment_hint = if let Some(ref c) = content {
-        leading_comment_lines(c)
+        leading_comment_lines(c, max_lines)
     } else {
         None
     };
 
     let mut info = format!("[FILE] {} ({} bytes, {} 行)", path, size, line_count);
-    if let Some(hint) = comment_hint {
+    if let Some(ref hint) = comment_hint {
         info.push_str(&format!("\n开头注释:\n{}", hint));
+    }
+
+    // 文件行数多时提示用 read 读全文
+    if line_count > 500 {
+        info.push_str(&format!("\n[提示] 文件共 {} 行，仅显示头部注释。如需完整内容请使用 read 工具。", line_count));
     }
 
     Ok(info)
@@ -104,20 +111,22 @@ fn glance_file(path: &str) -> Result<String> {
 /// 读取文件的开头连续注释行
 fn read_leading_comments(path: &Path) -> Option<String> {
     let content = read_file_robust(&path.to_string_lossy()).ok()?;
-    leading_comment_lines(&content)
+    leading_comment_lines(&content, 20)
 }
 
-fn leading_comment_lines(content: &str) -> Option<String> {
+fn leading_comment_lines(content: &str, max_lines: usize) -> Option<String> {
     let comment_prefixes = ["//", "#", ";", "--", "(*"];
     let mut comments = Vec::new();
+    let mut line_count = 0;
 
-    for line in content.lines().take(20) {
+    for line in content.lines().take(max_lines) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         if comment_prefixes.iter().any(|p| trimmed.starts_with(p)) {
             comments.push(trimmed);
+            line_count += 1;
         } else {
             break;
         }
@@ -126,6 +135,12 @@ fn leading_comment_lines(content: &str) -> Option<String> {
     if comments.is_empty() {
         None
     } else {
-        Some(comments.join("\n"))
+        let mut result = comments.join("\n");
+        if line_count >= max_lines {
+            result.push_str(&format!(
+                "\n[提示: 仅显示前 {max_lines} 行注释，文件可能还有更多注释内容]"
+            ));
+        }
+        Some(result)
     }
 }

@@ -172,8 +172,9 @@ impl LlmClient {
 
     /// 构建 API messages JSON（含工具调用）
     ///
-    /// 自动清理孤立的 tool_calls：如果 assistant 消息中的某些 tool_call 在后续消息中
-    /// 没有对应的 tool_result，则将这些 tool_call 从消息中移除，避免 API 返回 400 错误。
+    /// 自动清理孤立的 tool_calls 和 tool_result 双向防御：
+    /// - 孤立 tool_call：assistant 的 tool_calls 在后续没有对应 tool_result → 跳过或裁剪
+    /// - 孤立 tool_result：tool result 之前没有 assistant 声明过该 tool_call_id → 跳过
     fn build_api_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
         // 第一遍：收集所有有对应 tool_result 的 tool_call_id
         let mut completed_ids: HashSet<&str> = HashSet::new();
@@ -186,10 +187,19 @@ impl LlmClient {
         }
 
         let mut api = Vec::new();
+        // 第二遍：跟踪已声明的 tool_call_id（assistant 消息的 tool_calls 中的 id）
+        let mut declared_ids: HashSet<String> = HashSet::new();
         if let Some(sys) = system {
             api.push(json!({"role": "system", "content": sys}));
         }
         for msg in messages {
+            // 先收集此消息中声明的 tool_call_id（在跳过检查之前，确保后续 tool result 能匹配）
+            if let Some(ref tc) = msg.tool_calls {
+                for tc_item in tc {
+                    declared_ids.insert(tc_item.id.clone());
+                }
+            }
+
             // 检查此消息的 tool_calls 是否有孤立的（无对应 tool_result）
             let all_tc_orphaned = msg.tool_calls.as_ref().map_or(false, |tc| {
                 tc.iter().all(|tc| !completed_ids.contains(tc.id.as_str()))
@@ -199,6 +209,15 @@ impl LlmClient {
             // 直接跳过这条消息 —— 留它在消息列表中只会让 LLM 困惑
             if msg.role == "assistant" && all_tc_orphaned && msg.content.is_empty() {
                 continue;
+            }
+
+            // 跳过孤儿 tool result：没有 preceding assistant 声明过这个 tool_call_id
+            if msg.role == "tool" {
+                if let Some(ref tcid) = msg.tool_call_id {
+                    if !declared_ids.contains(tcid.as_str()) {
+                        continue;
+                    }
+                }
             }
 
             let content_val = if msg.content.is_empty() && msg.tool_calls.is_some() && !all_tc_orphaned {

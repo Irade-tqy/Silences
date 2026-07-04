@@ -219,6 +219,27 @@ impl RunFlags {
     pub fn should_pause(&self) -> bool { self.pause.load(Ordering::Relaxed) }
 }
 
+/// 工具截断限制配置（各工具共用的硬限制，通过 all_tools 传入）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToolLimits {
+    /// command stdout 最大 token 数（超出截断，完整内容存 console 文件）
+    pub command_stdout_max_tok: usize,
+    /// command stderr 最大 token 数
+    pub command_stderr_max_tok: usize,
+    /// glance 读取文件头部注释的最大行数（超出给出提示）
+    pub glance_max_comment_lines: usize,
+}
+
+impl Default for ToolLimits {
+    fn default() -> Self {
+        Self {
+            command_stdout_max_tok: 2000,
+            command_stderr_max_tok: 1000,
+            glance_max_comment_lines: 20,
+        }
+    }
+}
+
 /// 设置 agent 状态的请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetStateRequest {

@@ -2,10 +2,12 @@
 //!
 //! 每个工具测试：正常路径 + 错误路径 + 逆操作（如适用）。
 
+use std::collections::HashSet;
 use std::fs;
 use std::sync::Arc;
 
 use anyhow::Result;
+use silences_agent::queue::TaskQueue;
 use silences_agent::toolcall::{self, ToolDef, ToolOutcome};
 use silences_agent::toolcall::regret::ToolHistory;
 use tokio::sync::Mutex;
@@ -28,7 +30,13 @@ fn setup_test_dir(name: &str) -> std::path::PathBuf {
 
 fn tools() -> Vec<ToolDef> {
     let history = Arc::new(Mutex::new(ToolHistory::new(5)));
-    toolcall::all_tools(history)
+    toolcall::all_tools(
+        history,
+        Arc::new(Mutex::new(HashSet::new())),
+        Arc::new(TaskQueue::new()),
+        None,
+        Default::default(),
+    )
 }
 
 /// 帮助调用工具
@@ -306,7 +314,13 @@ async fn test_trash_file() {
 async fn test_regret_undo_create() {
     let dir = setup_test_dir("regret-create");
     let history = Arc::new(Mutex::new(ToolHistory::new(5)));
-    let tools = toolcall::all_tools(history.clone());
+    let tools = toolcall::all_tools(
+        history.clone(),
+        Arc::new(Mutex::new(HashSet::new())),
+        Arc::new(TaskQueue::new()),
+        None,
+        Default::default(),
+    );
 
     // 创建一个文件
     let path = dir.join("undo_test.txt").to_string_lossy().to_string();
@@ -336,7 +350,13 @@ async fn test_regret_undo_create() {
 #[tokio::test]
 async fn test_regret_empty_history() {
     let history = Arc::new(Mutex::new(ToolHistory::new(5)));
-    let tools = toolcall::all_tools(history);
+    let tools = toolcall::all_tools(
+        history,
+        Arc::new(Mutex::new(HashSet::new())),
+        Arc::new(TaskQueue::new()),
+        None,
+        Default::default(),
+    );
 
     // 空历史下调用 regret → 应失败
     let result = toolcall::execute_tool(&tools, "regret", serde_json::json!({}))
