@@ -1,6 +1,7 @@
 //! Silences 核心类型：Message, Session, Cost
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 单条对话消息
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -195,6 +196,35 @@ pub fn messages_to_view(msgs: Vec<Message>) -> Vec<ViewMessage> {
         .collect()
 }
 
+/// Agent 运行标志：停止 + 暂停（线程安全，通过 Arc 共享）
+#[derive(Debug)]
+pub struct RunFlags {
+    stop: AtomicBool,
+    pause: AtomicBool,
+}
+
+impl RunFlags {
+    pub fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            pause: AtomicBool::new(false),
+        }
+    }
+
+    pub fn signal_stop(&self)  { self.stop.store(true, Ordering::Relaxed); }
+    pub fn should_stop(&self) -> bool { self.stop.load(Ordering::Relaxed) }
+
+    pub fn signal_pause(&self)  { self.pause.store(true, Ordering::Relaxed); }
+    pub fn signal_resume(&self) { self.pause.store(false, Ordering::Relaxed); }
+    pub fn should_pause(&self) -> bool { self.pause.load(Ordering::Relaxed) }
+}
+
+/// 设置 agent 状态的请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetStateRequest {
+    pub action: String, // "pause" | "resume" | "stop"
+}
+
 /// SSE 事件类型（server → 前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -220,6 +250,12 @@ pub enum SseEvent {
     /// 上下文回退（兼作消息边界）
     #[serde(rename = "context_rollback")]
     ContextRollback,
+    /// agent 已暂停
+    #[serde(rename = "paused")]
+    Paused,
+    /// agent 已恢复运行
+    #[serde(rename = "resumed")]
+    Resumed,
     /// 错误
     #[serde(rename = "error")]
     Error { message: String },
@@ -278,4 +314,9 @@ pub struct SessionState {
     pub context: Vec<Message>,
     /// 当前任务队列中的待办任务
     pub tasks: Vec<TaskItem>,
+    /// agent 运行状态："idle" | "running" | "paused"
+    #[serde(default = "default_status")]
+    pub status: String,
 }
+
+fn default_status() -> String { "idle".to_string() }

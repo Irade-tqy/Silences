@@ -2,12 +2,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use silences_core::{Message, TokenUsage, ToolCallValue, ToolCallFunction};
+use silences_core::{Message, RunFlags, TokenUsage, ToolCallValue, ToolCallFunction};
 use silences_llm::{LlmClient, StreamDelta};
 use silences_db::Db;
 use tokio::sync::Mutex;
@@ -36,6 +35,10 @@ pub enum AgentEvent {
     ContextRollback,
     /// 消息边界：下一轮 LLM 响应是新消息
     MessageBoundary,
+    /// agent 已暂停
+    Paused,
+    /// agent 已恢复
+    Resumed,
     Error(String),
 }
 
@@ -66,10 +69,10 @@ pub fn run_agent(
     session_dir: Option<PathBuf>,
     tool_delay_ms: u64,
     warmup_enabled: bool,
-    stop_flag: Arc<AtomicBool>,
+    flags: Arc<RunFlags>,
     queue: Arc<TaskQueue>,
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
-    active_runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    active_runs: Arc<Mutex<HashMap<String, Arc<RunFlags>>>>,
 ) -> ReceiverStream<AgentEvent> {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
 
@@ -105,8 +108,44 @@ pub fn run_agent(
                 let _ = db_lock.save_context_snapshot(&session_id, &messages);
             }
 
+            // 暂停等待循环（每轮开始时检查，等待外部 resume 或 stop）
+            if flags.should_pause() {
+                eprintln!("[agent] session={} 暂停中，每 500ms 轮询 pause/stop 标志",
+                    &session_id[..8.min(session_id.len())]);
+                let mut was_paused = false;
+                while flags.should_pause() {
+                    if !was_paused {
+                        let _ = tx.send(AgentEvent::Paused).await;
+                        was_paused = true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if flags.should_stop() {
+                        // 停止时保存最终快照
+                        {
+                            let mut map = agent_contexts.lock().await;
+                            map.insert(session_id.clone(), messages.clone());
+                        }
+                        {
+                            let db_lock = db.lock().await;
+                            let _ = db_lock.save_context_snapshot(&session_id, &messages);
+                        }
+                        let _ = tx.send(AgentEvent::Error("已停止".into())).await;
+                        {
+                            let mut runs = active_runs.lock().await;
+                            runs.remove(&session_id);
+                        }
+                        eprintln!("[agent] session={} 暂停中被停止，退出",
+                            &session_id[..8.min(session_id.len())]);
+                        return;
+                    }
+                }
+                let _ = tx.send(AgentEvent::Resumed).await;
+                eprintln!("[agent] session={} 已恢复运行",
+                    &session_id[..8.min(session_id.len())]);
+            }
+
             // 检查外部停止信号
-            if stop_flag.load(Ordering::Relaxed) {
+            if flags.should_stop() {
                 eprintln!("[agent] 收到停止信号，退出 agent 循环");
                 let _ = tx.send(AgentEvent::Error("已停止".into())).await;
                 {
@@ -247,7 +286,7 @@ pub fn run_agent(
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await; // 等缓存稳定
                         }
 
-                        // 2. 刷新 B_delta / CONTEXT.md（name 用绝对路径）到内存和 DB
+                        // 2. 刷新 B_delta / CONTEXT.md（删旧插新，只保留最新一份）
                         if let Some(ref session_dir) = session_dir {
                             if let Some(fresh) = context::read_context_md(session_dir) {
                                 let ctx_name = session_dir.join("CONTEXT.md").to_string_lossy().to_string();
@@ -256,9 +295,23 @@ pub fn run_agent(
                                 } else {
                                     messages.push(Message::new_user(&ctx_name, &fresh));
                                 }
-                                // CONTEXT.md 也持久化到 DB
+                                // 删旧写新：DB 只保留一份 CONTEXT.md
+                                let _ = db_lock.delete_messages_by_name(&session_id, &ctx_name);
                                 let _ = db_lock.save_message(&session_id, &Message::new_user(&ctx_name, &fresh));
                             }
+                        }
+
+                        // 2a. 系统维护的任务列表（已完成 + 待处理），紧贴 CONTEXT.md
+                        if let Some(ref session_dir) = session_dir {
+                            let task_list_name = session_dir.join("task_list.md").to_string_lossy().to_string();
+                            let task_list_content = queue.format_for_context();
+                            if let Some(pos) = messages.iter().rposition(|m| m.name.as_deref() == Some(&task_list_name)) {
+                                messages[pos].content = task_list_content.clone();
+                            } else {
+                                messages.push(Message::new_user(&task_list_name, &task_list_content));
+                            }
+                            let _ = db_lock.delete_messages_by_name(&session_id, &task_list_name);
+                            let _ = db_lock.save_message(&session_id, &Message::new_user(&task_list_name, &task_list_content));
                         }
 
                         // 推进保留边界，使刚写入的摘要 + CONTEXT.md 不被下次 rollback 隐藏
@@ -383,7 +436,7 @@ pub fn run_agent(
                 };
 
                 // 执行 tool 前检查停止信号
-                if stop_flag.load(Ordering::Relaxed) {
+                if flags.should_stop() {
                     let err = "已停止".to_string();
                     let _ = tx.send(AgentEvent::ToolCall {
                         id: id.clone(), name: name.clone(),

@@ -2,6 +2,7 @@
 //!
 //! 线程安全。被 add_task 工具写入，start_task 按 ID 取出。
 //! 内部用 HashMap 存储（O(1) 查找/删除），Vec 保持 FIFO 顺序。
+//! 已完成任务单独记录，供上下文注入任务列表。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -13,6 +14,8 @@ pub struct TaskQueue {
     tasks: Mutex<HashMap<String, TaskItem>>,
     /// FIFO 顺序
     order: Mutex<Vec<String>>,
+    /// 已完成任务（按完成顺序）
+    completed: Mutex<Vec<TaskItem>>,
 }
 
 impl TaskQueue {
@@ -20,6 +23,7 @@ impl TaskQueue {
         Self {
             tasks: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
+            completed: Mutex::new(Vec::new()),
         }
     }
 
@@ -60,5 +64,51 @@ impl TaskQueue {
         let order = self.order.lock().unwrap();
         let tasks = self.tasks.lock().unwrap();
         order.iter().filter_map(|id| tasks.get(id).cloned()).collect()
+    }
+
+    /// 标记任务已完成：从待处理移到已完成列表末尾
+    pub fn complete_task(&self, id: &str) {
+        let item = self.remove(id);
+        if let Some(item) = item {
+            let mut completed = self.completed.lock().unwrap();
+            completed.push(item);
+        }
+    }
+
+    /// 返回已完成任务列表
+    pub fn completed_list(&self) -> Vec<TaskItem> {
+        let completed = self.completed.lock().unwrap();
+        completed.clone()
+    }
+
+    /// 生成供上下文注入的任务列表 Markdown（已完成 + 待处理）
+    pub fn format_for_context(&self) -> String {
+        let completed = self.completed.lock().unwrap();
+        let order = self.order.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap();
+
+        let mut parts = Vec::new();
+
+        // 已完成
+        if !completed.is_empty() {
+            parts.push("### 已完成".to_string());
+            for t in completed.iter() {
+                parts.push(format!("- {}: {}", t.id, t.description));
+            }
+        }
+
+        // 待处理
+        if !order.is_empty() {
+            parts.push("### 待处理".to_string());
+            for id in order.iter() {
+                if let Some(t) = tasks.get(id) {
+                    parts.push(format!("- {}: {}", t.id, t.description));
+                }
+            }
+        } else if completed.is_empty() {
+            parts.push("_暂无任务_".to_string());
+        }
+
+        parts.join("\n")
     }
 }

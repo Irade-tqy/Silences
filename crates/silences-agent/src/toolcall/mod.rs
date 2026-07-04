@@ -332,7 +332,7 @@ pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, qu
         command::tool(),
         trash::tool(),
         start_task::tool(queue.clone()),
-        end_task::tool(),
+        end_task::tool(queue.clone()),
         add_task::tool(queue),
 
     ]

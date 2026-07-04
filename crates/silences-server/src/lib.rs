@@ -22,7 +22,7 @@ use silences_agent::agent::{run_agent, AgentEvent};
 use silences_agent::queue::TaskQueue;
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
-use silences_core::{ChatRequest, Message, Session, SessionState, Settings, SettingsUpdate, SseEvent, ViewMessage, messages_to_view};
+use silences_core::{ChatRequest, Message, RunFlags, Session, SessionState, SetStateRequest, Settings, SettingsUpdate, SseEvent, ViewMessage, messages_to_view};
 use silences_db::Db;
 use silences_llm::LlmClient;
 use tokio::sync::Mutex;
@@ -41,8 +41,8 @@ struct AppState {
     db: Arc<Mutex<Db>>,
     /// 每个会话的 agent 工具历史（用于 regret）
     agent_histories: Mutex<HashMap<String, Arc<Mutex<ToolHistory>>>>,
-    /// 当前正在运行的 agent 停止标志
-    active_runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// 当前正在运行的 agent 运行标志（stop / pause）
+    active_runs: Arc<Mutex<HashMap<String, Arc<RunFlags>>>>,
     /// 最大上下文消息数（对话历史窗口）
     max_context_messages: usize,
     /// 当前设置的 system prompt（运行时可变）
@@ -132,7 +132,7 @@ pub async fn serve(
         .route("/sessions/{id}/state", get(handle_session_state))
         .route("/sessions/{id}/rename", put(handle_rename_session))
         .route("/sessions/{id}", delete(handle_delete_session))
-        .route("/sessions/{id}/stop", post(handle_stop_agent))
+        .route("/sessions/{id}/set_state", post(handle_set_state))
         .route("/settings", get(handle_get_settings))
         .route("/settings", put(handle_put_settings))
         .layer(CorsLayer::permissive())
@@ -249,13 +249,23 @@ async fn handle_chat(
     let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
     let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker, state.task_queue.clone());
 
-    // 创建停止标志并注册到 active_runs
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    // 如果该 session 已有活跃运行，先停止旧标志
     {
         let mut runs = state.active_runs.lock().await;
-        runs.insert(session_id.clone(), stop_flag.clone());
+        if let Some(old) = runs.remove(&session_id) {
+            old.signal_stop();
+            eprintln!("[chat] session={} 已有活跃 agent，已发停止信号",
+                &session_id[..8.min(session_id.len())]);
+        }
     }
-    eprintln!("[chat] session={} 注册停止标志", &session_id[..8.min(session_id.len())]);
+
+    // 创建运行标志（stop / pause）并注册到 active_runs
+    let flags = Arc::new(RunFlags::new());
+    {
+        let mut runs = state.active_runs.lock().await;
+        runs.insert(session_id.clone(), flags.clone());
+    }
+    eprintln!("[chat] session={} 注册运行标志", &session_id[..8.min(session_id.len())]);
 
     // 启动 agent 循环（传入 session_dir 用于读写 CONTEXT.md）
     let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
@@ -270,7 +280,7 @@ async fn handle_chat(
         Some(ctx.session_dir.clone()),
         state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
         warmup_enabled,
-        stop_flag,
+        flags,
         state.task_queue.clone(),
         state.agent_contexts.clone(),
         state.active_runs.clone(),
@@ -333,6 +343,16 @@ fn agent_to_sse(
                 AgentEvent::ContextRollback => {
                     yield Ok(Event::default().data(
                         serde_json::to_string(&SseEvent::ContextRollback).unwrap()
+                    ));
+                }
+                AgentEvent::Paused => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Paused).unwrap()
+                    ));
+                }
+                AgentEvent::Resumed => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Resumed).unwrap()
                     ));
                 }
                 AgentEvent::MessageBoundary => {
@@ -494,8 +514,18 @@ async fn handle_session_state(
         }
     };
     let tasks = state.task_queue.list();
-    eprintln!("[GET /sessions/{}/state] context={} tasks={}", &id[..8.min(id.len())], context.len(), tasks.len());
-    Ok(Json(SessionState { context, tasks }))
+    // 查询当前 agent 运行状态
+    let status = {
+        let runs = state.active_runs.lock().await;
+        if let Some(f) = runs.get(&id) {
+            if f.should_pause() { "paused".to_string() } else { "running".to_string() }
+        } else {
+            "idle".to_string()
+        }
+    };
+    eprintln!("[GET /sessions/{}/state] context={} tasks={} status={}",
+        &id[..8.min(id.len())], context.len(), tasks.len(), status);
+    Ok(Json(SessionState { context, tasks, status }))
 }
 
 /// 重命名会话
@@ -535,18 +565,44 @@ async fn handle_delete_session(
     Ok(Json(()))
 }
 
-/// 停止指定会话的 agent 运行
-async fn handle_stop_agent(
+/// 设置 agent 运行状态（暂停 / 继续 / 停止）
+async fn handle_set_state(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Json(req): Json<SetStateRequest>,
 ) -> Result<Json<()>, (StatusCode, String)> {
-    let mut runs = state.active_runs.lock().await;
-    if let Some(flag) = runs.remove(&id) {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        eprintln!("[STOP] session={} 已发送停止信号", &id[..8.min(id.len())]);
-        Ok(Json(()))
-    } else {
-        eprintln!("[STOP] session={} 无正在运行的 agent", &id[..8.min(id.len())]);
-        Ok(Json(())) // 幂等：没有运行中的也返回成功
+    match req.action.as_str() {
+        "pause" => {
+            let runs = state.active_runs.lock().await;
+            if let Some(f) = runs.get(&id) {
+                f.signal_pause();
+                eprintln!("[SET_STATE] session={} 暂停", &id[..8.min(id.len())]);
+                Ok(Json(()))
+            } else {
+                Err((StatusCode::BAD_REQUEST, "没有正在运行的 agent".into()))
+            }
+        }
+        "resume" => {
+            let runs = state.active_runs.lock().await;
+            if let Some(f) = runs.get(&id) {
+                f.signal_resume();
+                eprintln!("[SET_STATE] session={} 恢复", &id[..8.min(id.len())]);
+                Ok(Json(()))
+            } else {
+                Err((StatusCode::BAD_REQUEST, "没有正在运行的 agent".into()))
+            }
+        }
+        "stop" => {
+            let mut runs = state.active_runs.lock().await;
+            if let Some(f) = runs.remove(&id) {
+                f.signal_stop();
+                eprintln!("[SET_STATE] session={} 停止", &id[..8.min(id.len())]);
+                Ok(Json(()))
+            } else {
+                eprintln!("[SET_STATE] session={} 无正在运行的 agent", &id[..8.min(id.len())]);
+                Ok(Json(())) // 幂等
+            }
+        }
+        _ => Err((StatusCode::BAD_REQUEST, format!("未知动作: {}", req.action))),
     }
 }

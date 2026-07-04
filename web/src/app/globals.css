@@ -971,6 +971,14 @@ html, body {
   opacity: 0.4;
   pointer-events: none;
 }
+/* Stop button (danger variant shown alongside resume in paused state) */
+.send-btn.stop-btn {
+  margin-left: 6px;
+  background: var(--ds-danger-fill, #e04848);
+}
+.send-btn.stop-btn:hover {
+  background: var(--ds-danger-hover, #c03535);
+}
 
 /* ═════════════════════════════════════════════
    DISCLAIMER BAR (usage — top-right floating)

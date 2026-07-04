@@ -219,6 +219,15 @@ impl Db {
         }
     }
 
+    /// 删除此会话中指定 name 的所有消息（用于刷新 CONTEXT.md / 任务列表）
+    pub fn delete_messages_by_name(&self, session_id: &str, name: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE session_id=?1 AND name=?2",
+            rusqlite::params![session_id, name],
+        )?;
+        Ok(())
+    }
+
     // ── Token 用量 ──
 
     pub fn save_usage(&self, session_id: &str, round: u32, usage: &TokenUsage) -> Result<()> {

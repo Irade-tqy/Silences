@@ -54,6 +54,7 @@ interface RawMessage {
 interface SessionState {
   context: RawMessage[];
   tasks: Array<{ id: string; description: string }>;
+  status: string; // "idle" | "running" | "paused"
 }
 
 // ─── Config ──────────────────────────────────────────────
@@ -115,6 +116,7 @@ export default function Page() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [totalUsage, setTotalUsage] = useState<TokenUsage | null>(null);
   const [roundUsage, setRoundUsage] = useState<TokenUsage | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -191,6 +193,7 @@ export default function Page() {
     setMessages([]);
     setTotalUsage(null);
     setRoundUsage(null);
+    setPaused(false);
     abortRef.current?.abort();
   }, []);
 
@@ -446,6 +449,10 @@ export default function Page() {
                 cache_miss_tokens: prev.cache_miss_tokens + u.cache_miss_tokens,
                 cost_yuan: prev.cost_yuan + u.cost_yuan,
               } : u);
+            } else if (ev.type === 'paused') {
+              setPaused(true);
+            } else if (ev.type === 'resumed') {
+              setPaused(false);
             } else if (ev.type === 'message_boundary' || ev.type === 'context_rollback') {
               setMessages(prev => {
                 const tail = prev.map((m, i) =>
@@ -453,14 +460,7 @@ export default function Page() {
                 );
                 return [...tail, { role: 'assistant', content: '', isStreaming: true }];
               });
-            } else if (ev.type === 'message_boundary' || ev.type === 'context_rollback') {
-            setMessages(prev => {
-              const tail = prev.map((m, i) =>
-                i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
-              );
-              return [...tail, { role: 'assistant', content: '', isStreaming: true }];
-            });
-          } else if (ev.type === 'error') {
+            } else if (ev.type === 'error') {
               setMessages(prev => prev.map((m, i) =>
                 i === prev.length - 1 && m.isStreaming
                   ? { ...m, content: m.content + `\n⚠️ ${ev.message}`, isStreaming: false }
@@ -495,14 +495,19 @@ export default function Page() {
       ));
     } finally {
       setLoading(false);
+      setPaused(false);
       abortRef.current = null;
     }
   }, [input, loading, activeId, loadSessions]);
 
   const stopGeneration = useCallback(() => {
-    // 先通知后端停止 agent 运行
+    // 先通知后端停止 agent 运行（统一 set_state 端点）
     if (activeId) {
-      fetch(`${API}/sessions/${activeId}/stop`, { method: 'POST' }).catch(() => {});
+      fetch(`${API}/sessions/${activeId}/set_state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      }).catch(() => {});
     }
     // 再中止前端 fetch 流
     if (abortRef.current) {
@@ -511,6 +516,29 @@ export default function Page() {
         i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
       ));
     }
+    setPaused(false);
+  }, [activeId]);
+
+  const pauseGeneration = useCallback(() => {
+    if (activeId) {
+      fetch(`${API}/sessions/${activeId}/set_state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'pause' }),
+      }).catch(() => {});
+    }
+    // 不断开 SSE——agent 暂停后无数据，resume 后继续推流
+  }, [activeId]);
+
+  const resumeGeneration = useCallback(() => {
+    if (activeId) {
+      fetch(`${API}/sessions/${activeId}/set_state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'resume' }),
+      }).catch(() => {});
+    }
+    // agent 恢复后继续通过同一 SSE 连接推流
   }, [activeId]);
 
   // 提取 SSE 流处理为独立函数（chat 和重连复用）
@@ -844,22 +872,46 @@ export default function Page() {
                     </button>
                   </div>
                   <div className="input-actions-right">
-                    <button
-                      className={`send-btn ${hasText || loading ? 'active' : ''}`}
-                      onClick={loading ? stopGeneration : sendMessage}
-                      disabled={!hasText && !loading}
-                      title={loading ? '停止' : '发送'}
-                    >
-                      {loading ? (
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                          <rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/>
-                        </svg>
-                      ) : (
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                          <path d="M8.3125 0.981587C8.66767 1.0545 8.97902 1.20558 9.2627 1.43374C9.48724 1.61438 9.73029 1.85933 9.97949 2.10854L14.707 6.83608L13.293 8.25014L9 3.95717V15.0431H7V3.95717L2.70703 8.25014L1.29297 6.83608L6.02051 2.10854C6.26971 1.85933 6.51277 1.61438 6.7373 1.43374C6.97662 1.24126 7.28445 1.04542 7.6875 0.981587C7.8973 0.94841 8.1031 0.956564 8.3125 0.981587Z" fill="currentColor"/>
-                        </svg>
-                      )}
-                    </button>
+                    {loading && paused ? (
+                      <>
+                        <button
+                          className="send-btn active"
+                          onClick={resumeGeneration}
+                          title="继续"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <polygon points="4,2 14,8 4,14" fill="currentColor"/>
+                          </svg>
+                        </button>
+                        <button
+                          className="send-btn active stop-btn"
+                          onClick={stopGeneration}
+                          title="停止"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/>
+                          </svg>
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className={`send-btn ${hasText || loading ? 'active' : ''}`}
+                        onClick={loading ? pauseGeneration : sendMessage}
+                        disabled={!hasText && !loading}
+                        title={loading ? '暂停' : '发送'}
+                      >
+                        {loading ? (
+                          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <rect x="3" y="2" width="3.5" height="12" rx="1" fill="currentColor"/>
+                            <rect x="9.5" y="2" width="3.5" height="12" rx="1" fill="currentColor"/>
+                          </svg>
+                        ) : (
+                          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M8.3125 0.981587C8.66767 1.0545 8.97902 1.20558 9.2627 1.43374C9.48724 1.61438 9.73029 1.85933 9.97949 2.10854L14.707 6.83608L13.293 8.25014L9 3.95717V15.0431H7V3.95717L2.70703 8.25014L1.29297 6.83608L6.02051 2.10854C6.26971 1.85933 6.51277 1.61438 6.7373 1.43374C6.97662 1.24126 7.28445 1.04542 7.6875 0.981587C7.8973 0.94841 8.1031 0.956564 8.3125 0.981587Z" fill="currentColor"/>
+                          </svg>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
