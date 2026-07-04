@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll};
 
 use axum::{
     Json, Router,
@@ -17,9 +19,10 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use silences_agent::agent::{run_agent, AgentEvent};
+use silences_agent::queue::TaskQueue;
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
-use silences_core::{ChatRequest, Message, Session, Settings, SettingsUpdate, SseEvent};
+use silences_core::{ChatRequest, Message, ViewMessage, Session, Settings, SettingsUpdate, SseEvent, messages_to_view};
 use silences_db::Db;
 use silences_llm::LlmClient;
 use tokio::sync::Mutex;
@@ -32,32 +35,50 @@ struct RenameRequest {
     name: String,
 }
 
-/// 审批请求
-#[derive(serde::Deserialize)]
-struct ApproveRequest {
-    /// 审批会话 ID（由 present_task_list 生成）
-    #[allow(dead_code)]
-    approval_id: String,
-    /// 目标会话 ID
-    session_id: String,
-    /// 是否批准
-    approved: bool,
-    /// 驳回时的反馈（approved=false 时可选）
-    feedback: Option<String>,
-}
-
 /// 应用状态
 struct AppState {
     llm: LlmClient,
     db: Arc<Mutex<Db>>,
     /// 每个会话的 agent 工具历史（用于 regret）
     agent_histories: Mutex<HashMap<String, Arc<Mutex<ToolHistory>>>>,
+    /// 当前正在运行的 agent 停止标志
+    active_runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// 最大上下文消息数（对话历史窗口）
     max_context_messages: usize,
     /// 当前设置的 system prompt（运行时可变）
     system_prompt: StdMutex<Option<String>>,
     /// 项目根目录（用于读取 SILENCES.md / CONTEXT.md）
     project_root: Option<PathBuf>,
+    /// 工具循环延迟（毫秒），每个 round 之间暂停
+    tool_delay_ms: AtomicU64,
+    /// 动态任务优先队列
+    task_queue: Arc<TaskQueue>,
+}
+
+/// 流包装器：在 drop 时从 active_runs 中移除停止标志
+struct CleanupStream<S> {
+    inner: S,
+    state: Arc<AppState>,
+    session_id: String,
+}
+
+impl<S> Drop for CleanupStream<S> {
+    fn drop(&mut self) {
+        let state = self.state.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let mut runs = state.active_runs.lock().await;
+            runs.remove(&sid);
+        });
+    }
+}
+
+impl<S: Stream<Item = T> + Unpin, T> Stream for CleanupStream<S> {
+    type Item = T;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_next(cx)
+    }
 }
 
 /// 启动服务
@@ -77,25 +98,32 @@ pub async fn serve(
         eprintln!("[serve] 未保存 system prompt");
     }
 
-    let project_root = project_root.or_else(silences_agent::context::find_project_root);
+    // 保底使用 cwd（不靠 .git 目录瞎找）
+    let project_root = project_root.or_else(|| std::env::current_dir().ok());
+    let tool_delay_ms = db.get_setting("tool_delay_ms").ok().flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     let state = Arc::new(AppState {
         llm,
         db: Arc::new(Mutex::new(db)),
         agent_histories: Mutex::new(HashMap::new()),
+        active_runs: Mutex::new(HashMap::new()),
         max_context_messages,
         system_prompt: StdMutex::new(saved_system),
         project_root,
+        tool_delay_ms: AtomicU64::new(tool_delay_ms),
+        task_queue: Arc::new(TaskQueue::new()),
     });
 
     let app = Router::new()
         .route("/chat", post(handle_chat))
-        .route("/approve", post(handle_approve))
         .route("/sessions", get(handle_list_sessions))
         .route("/sessions/{id}/messages", get(handle_session_messages))
         .route("/sessions/{id}/usage", get(handle_session_usage))
         .route("/sessions/{id}/rename", put(handle_rename_session))
         .route("/sessions/{id}", delete(handle_delete_session))
+        .route("/sessions/{id}/stop", post(handle_stop_agent))
         .route("/settings", get(handle_get_settings))
         .route("/settings", put(handle_put_settings))
         .layer(CorsLayer::permissive())
@@ -129,9 +157,14 @@ async fn handle_chat(
         req.session_id.clone().unwrap()
     } else {
         let db = state.db.lock().await;
-        db.create_session().map_err(|e| {
+        let sid = db.create_session().map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-        })?
+        })?;
+        // 新会话初始化上下文文件
+        if let Some(ref root) = state.project_root {
+            let _ = silences_agent::context::init_session_context(root, &sid);
+        }
+        sid
     };
 
     // 保存用户消息
@@ -144,48 +177,30 @@ async fn handle_chat(
     }
 
     // 加载历史消息（上下文窗口）
-    let mut context = {
+    let history = {
         let db = state.db.lock().await;
-        db.get_messages(&session_id).map_err(|e| {
+        let mut msgs = db.get_messages(&session_id).map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-        })?
+        })?;
+        if msgs.len() > state.max_context_messages {
+            msgs = msgs[msgs.len() - state.max_context_messages..].to_vec();
+        }
+        msgs
     };
 
-    // 截断到 max_context_messages（最新的 N 条）
-    if context.len() > state.max_context_messages {
-        context = context[context.len() - state.max_context_messages..].to_vec();
-    }
+    // 读取 SILENCES.md（会话级），CONTEXT.md 由 agent 延迟注入
+    let ctx = silences_agent::context::load_project_context(
+        state.project_root.as_deref(),
+        Some(&session_id),
+    );
 
-    // 读取 SILENCES.md 和 CONTEXT.md
-    let ctx = state.project_root.as_ref()
-        .map(|root| silences_agent::context::load_project_context(Some(root)))
-        .unwrap_or_else(|| silences_agent::context::load_project_context(None));
-
-    // 构建 warmup 前缀消息 = A(历史) + u_user + SILENCES.md
-    let mut warmup_msgs = context.clone();
-    warmup_msgs.push(Message::new_user("user", &req.message));
+    // 构造 context：SILENCES.md 在最前，然后历史消息
+    let silences_name = ctx.session_dir.join("SILENCES.md").to_string_lossy().to_string();
+    let mut context: Vec<Message> = Vec::new();
     if let Some(ref silences) = ctx.silences_md {
-        warmup_msgs.push(Message::new_user("system", silences));
+        context.push(Message::new_user(&silences_name, silences));
     }
-
-    // 预热稳定前缀（异步发送，不阻塞）
-    if warmup_msgs.len() > 2 && ctx.silences_md.is_some() {
-        let llm = state.llm.clone_for_agent();
-        let sys = system.clone();
-        tokio::spawn(async move {
-            if let Err(e) = llm.warmup_prefix(&warmup_msgs, sys.as_deref()).await {
-                eprintln!("[warmup] 失败: {e}");
-            }
-        });
-    }
-
-    // 将 SILENCES.md / CONTEXT.md 注入到 context 中（用于 agent 的实际请求）
-    if let Some(ref silences) = ctx.silences_md {
-        context.push(Message::new_user("system", silences));
-    }
-    if let Some(ref delta) = ctx.context_delta {
-        context.push(Message::new_user("system", delta));
-    }
+    context.extend(history);
 
     // 日志：本次请求的完整上下文
     eprintln!("——[REQ]——————————————————————————————");
@@ -223,9 +238,17 @@ async fn handle_chat(
 
     // 注册工具（每个会话独立的读记录）
     let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
-    let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker);
+    let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker, state.task_queue.clone());
 
-    // 启动 agent 循环
+    // 创建停止标志并注册到 active_runs
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut runs = state.active_runs.lock().await;
+        runs.insert(session_id.clone(), stop_flag.clone());
+    }
+    eprintln!("[chat] session={} 注册停止标志", &session_id[..8.min(session_id.len())]);
+
+    // 启动 agent 循环（传入 session_dir 用于读写 CONTEXT.md）
     let agent_stream = run_agent(
         state.llm.clone_for_agent(),
         tools,
@@ -234,100 +257,22 @@ async fn handle_chat(
         tool_history,
         Arc::clone(&state.db),
         session_id.clone(),
+        Some(ctx.session_dir.clone()),
+        state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
+        stop_flag,
+        state.task_queue.clone(),
     );
 
     // 将 AgentEvent 转换为 SSE Event
     let sse_stream = agent_to_sse(agent_stream, session_id.clone(), is_new_session);
 
-    Ok(Sse::new(sse_stream))
-}
-
-/// 处理审批请求
-async fn handle_approve(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<ApproveRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, axum::Error>>>, (StatusCode, String)> {
-    // 检查 API key
-    if state.llm.api_key_snapshot().map_or(true, |k| k.is_empty()) {
-        return Err((StatusCode::BAD_REQUEST,
-            "请先在设置页面中配置 API Key".to_string()));
-    }
-
-    let system = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
-
-    // 加载历史消息
-    let mut context = {
-        let db = state.db.lock().await;
-        db.get_messages(&req.session_id).map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-        })?
+    // 包装流：结束时自动清理停止标志
+    let sse_stream = CleanupStream {
+        inner: sse_stream,
+        state: state.clone(),
+        session_id: session_id.clone(),
     };
 
-    // 注入审批结果
-    if req.approved {
-        context.push(Message::new_user("orch", "审批通过，按任务列表开始执行"));
-        eprintln!("[approve] {} 审批通过", &req.session_id[..8.min(req.session_id.len())]);
-    } else {
-        let feedback = req.feedback.as_deref().unwrap_or("请重新拆分为更合理的任务");
-        context.push(Message::new_user("orch", &format!("用户驳回了任务列表：{}。请重新调查并拆分任务。", feedback)));
-        eprintln!("[approve] {} 驳回: {}", &req.session_id[..8.min(req.session_id.len())], feedback);
-    }
-
-    // 截断到 max_context_messages
-    if context.len() > state.max_context_messages {
-        context = context[context.len() - state.max_context_messages..].to_vec();
-    }
-
-    // SILENCES.md / CONTEXT.md 注入
-    let ctx = state.project_root.as_ref()
-        .map(|root| silences_agent::context::load_project_context(Some(root)))
-        .unwrap_or_else(|| silences_agent::context::load_project_context(None));
-
-    if let Some(ref silences) = ctx.silences_md {
-        context.push(Message::new_user("system", silences));
-    }
-    if let Some(ref delta) = ctx.context_delta {
-        context.push(Message::new_user("system", delta));
-    }
-
-    // 获取工具历史
-    let tool_history = {
-        let mut histories = state.agent_histories.lock().await;
-        histories
-            .entry(req.session_id.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(ToolHistory::new(5))))
-            .clone()
-    };
-    let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
-    let tools: Vec<ToolDef> = toolcall::all_tools(tool_history.clone(), read_tracker);
-
-    // 预热稳定前缀
-    let mut warmup_msgs = context.clone();
-    // 截断 warmup 消息到 SILENCES.md 为止（只保留稳定前缀）
-    let warmup_end = warmup_msgs.iter().rposition(|m| m.name.as_deref() == Some("system")).map(|i| i + 1).unwrap_or(warmup_msgs.len());
-    warmup_msgs.truncate(warmup_end);
-    if warmup_msgs.len() > 2 {
-        let llm = state.llm.clone_for_agent();
-        let sys = system.clone();
-        tokio::spawn(async move {
-            if let Err(e) = llm.warmup_prefix(&warmup_msgs, sys.as_deref()).await {
-                eprintln!("[warmup/approve] 失败: {e}");
-            }
-        });
-    }
-
-    // 启动 agent
-    let agent_stream = run_agent(
-        state.llm.clone_for_agent(),
-        tools,
-        context,
-        system.clone(),
-        tool_history,
-        Arc::clone(&state.db),
-        req.session_id.clone(),
-    );
-
-    let sse_stream = agent_to_sse(agent_stream, req.session_id.clone(), false);
     Ok(Sse::new(sse_stream))
 }
 
@@ -358,19 +303,9 @@ fn agent_to_sse(
                         serde_json::to_string(&SseEvent::Reasoning { content: r }).unwrap()
                     ));
                 }
-                AgentEvent::ToolCalling { name, args } => {
+                AgentEvent::ToolCall { id, name, args, result } => {
                     yield Ok(Event::default().data(
-                        serde_json::to_string(&SseEvent::ToolCalling { name, args }).unwrap()
-                    ));
-                }
-                AgentEvent::ToolResult { name, summary } => {
-                    yield Ok(Event::default().data(
-                        serde_json::to_string(&SseEvent::ToolResult { name, summary }).unwrap()
-                    ));
-                }
-                AgentEvent::PendingApproval { tasks, approval_id } => {
-                    yield Ok(Event::default().data(
-                        serde_json::to_string(&SseEvent::PendingApproval { tasks, approval_id }).unwrap()
+                        serde_json::to_string(&SseEvent::ToolCall { id, name, args, result }).unwrap()
                     ));
                 }
                 AgentEvent::Usage(u) => {
@@ -381,6 +316,16 @@ fn agent_to_sse(
                 AgentEvent::Error(e) => {
                     yield Ok(Event::default().data(
                         serde_json::to_string(&SseEvent::Error { message: e }).unwrap()
+                    ));
+                }
+                AgentEvent::ContextRollback => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::ContextRollback).unwrap()
+                    ));
+                }
+                AgentEvent::MessageBoundary => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::MessageBoundary).unwrap()
                     ));
                 }
             }
@@ -402,8 +347,12 @@ async fn handle_get_settings(
         }
     });
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
-    eprintln!("[GET /settings] api_key={:?} system_prompt={:?}", masked.as_deref().unwrap_or("(none)"), system_prompt.as_deref().unwrap_or("(none)"));
-    Ok(Json(Settings { api_key: masked, system_prompt }))
+    let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("[GET /settings] api_key={:?} system_prompt={:?} tool_delay_ms={}",
+        masked.as_deref().unwrap_or("(none)"),
+        system_prompt.as_deref().unwrap_or("(none)"),
+        tool_delay_ms);
+    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms }))
 }
 
 /// 更新设置
@@ -411,9 +360,10 @@ async fn handle_put_settings(
     State(state): State<Arc<AppState>>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<Settings>, (StatusCode, String)> {
-    eprintln!("[PUT /settings] api_key={:?} system_prompt={:?}",
+    eprintln!("[PUT /settings] api_key={:?} system_prompt={:?} tool_delay_ms={:?}",
         update.api_key.as_ref().map(|_| "(provided)"),
         update.system_prompt.as_deref(),
+        update.tool_delay_ms,
     );
 
     // 更新 API key（如果提供了）
@@ -444,6 +394,14 @@ async fn handle_put_settings(
             eprintln!("[PUT /settings] system prompt 已保存");
         }
     }
+    // 更新 tool delay
+    if let Some(delay) = update.tool_delay_ms {
+        state.tool_delay_ms.store(delay, std::sync::atomic::Ordering::Relaxed);
+        let db = state.db.lock().await;
+        let _ = db.set_setting("tool_delay_ms", &delay.to_string());
+        eprintln!("[PUT /settings] tool_delay_ms 已更新: {}ms", delay);
+    }
+
     // 返回当前设置
     let api_key = state.llm.api_key_snapshot();
     let masked = api_key.as_ref().map(|k| {
@@ -454,7 +412,8 @@ async fn handle_put_settings(
         }
     });
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
-    Ok(Json(Settings { api_key: masked, system_prompt }))
+    let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms }))
 }
 
 /// 列出所有会话
@@ -484,12 +443,13 @@ async fn handle_session_usage(
 async fn handle_session_messages(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<Message>>, (StatusCode, String)> {
+) -> Result<Json<Vec<ViewMessage>>, (StatusCode, String)> {
     let db = state.db.lock().await;
     let msgs = db.get_messages(&id).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
     })?;
-    Ok(Json(msgs))
+    // 预处理为前端可直接渲染的格式（嵌入 tool_results，过滤 tool 角色消息）
+    Ok(Json(messages_to_view(msgs)))
 }
 
 /// 重命名会话
@@ -518,6 +478,26 @@ async fn handle_delete_session(
     // 清理 agent 历史
     let mut histories = state.agent_histories.lock().await;
     histories.remove(&id);
+    // 删除会话上下文文件
+    if let Some(ref root) = state.project_root {
+        silences_agent::context::delete_session_context(root, &id);
+    }
     eprintln!("[DELETE] session={}", &id[..8.min(id.len())]);
     Ok(Json(()))
+}
+
+/// 停止指定会话的 agent 运行
+async fn handle_stop_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<()>, (StatusCode, String)> {
+    let mut runs = state.active_runs.lock().await;
+    if let Some(flag) = runs.remove(&id) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("[STOP] session={} 已发送停止信号", &id[..8.min(id.len())]);
+        Ok(Json(()))
+    } else {
+        eprintln!("[STOP] session={} 无正在运行的 agent", &id[..8.min(id.len())]);
+        Ok(Json(())) // 幂等：没有运行中的也返回成功
+    }
 }

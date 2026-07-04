@@ -7,13 +7,13 @@ use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use serde_json::Value;
 
-use super::{read_file_robust, InverseOp, ToolDef, ToolOutcome};
+use super::{expand_pattern, read_file_robust, InverseOp, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
         name: "raw_edit",
         description:
-            "将文件中正则匹配的第一个结果替换为指定字符串。不执行换行符和缩进标准化。\nwhy: 需要保持文件原始格式（CRLF、Tab 等）时使用。\nhow: 不指定 line 且匹配不唯一时报错。",
+            "将文件中正则匹配的第一个结果替换为指定字符串。不执行换行符和缩进标准化。\nwhy: 需要保持文件原始格式（CRLF、Tab 等）时使用。\nhow: 全文匹配（不按行拆分），正则引擎为 fancy-regex，`(`, `)`, `*`, `+`, `.`, `[`, `]`, `{`, `}`, `^`, `$`, `\\` 均为元字符，需 `\\` 转义。\n提示: 反引号内为纯文本，可与正则混写。如 `fn main()`*\n 匹配 \"fn main()\" 后跟正则 *\\n。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -23,7 +23,7 @@ pub fn tool() -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "正则表达式"
+                    "description": "正则表达式；反引号内纯文本，可混写。如 `fn()`abc"
                 },
                 "replacement": {
                     "type": "string",
@@ -43,11 +43,12 @@ pub fn tool() -> ToolDef {
 
 async fn execute(args: Value) -> Result<ToolOutcome> {
     let file = args["file"].as_str().context("缺少 file 参数")?;
-    let pattern_str = args["pattern"].as_str().context("缺少 pattern 参数")?;
+    let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let replacement = args["replacement"].as_str().context("缺少 replacement 参数")?;
     let target_line = args.get("line").and_then(Value::as_u64);
 
-    let re = Regex::new(pattern_str).context("正则表达式无效")?;
+    let re_pattern = expand_pattern(raw_pattern);
+    let re = Regex::new(&re_pattern).context("正则表达式无效")?;
     let original = read_file_robust(file)?;
 
     // 全文匹配（不按行拆分，支持跨行正则）
@@ -58,7 +59,7 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
     }
 
     if matches_positions.is_empty() {
-        anyhow::bail!("未找到匹配 \"{}\"", pattern_str);
+        anyhow::bail!("未找到匹配 \"{}\"", raw_pattern);
     }
 
     // 构建行起始字节偏移表 → O(log n) 字节定位行号
@@ -109,5 +110,7 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         rollback: false,
     
         approval_pending: None,
+    inject_messages: vec![],
+    defer_rollback: false,
     })
 }

@@ -32,12 +32,12 @@ async fn main() -> Result<()> {
         .unwrap_or(50);
 
     let mut llm = LlmClient::new(api_key, base_url, model);
-    // 调试日志目录（可选）
-    if let Ok(debug_dir) = env::var("SILENCES_DEBUG_DIR") {
-        let path = std::path::PathBuf::from(&debug_dir);
-        llm = llm.with_debug_dir(path);
-        eprintln!("[silences-server] API 调试日志目录: {debug_dir}");
-    }
+    // 调试日志目录（默认项目根目录，写入 api_debug.json）
+    let debug_dir = env::var("SILENCES_DEBUG_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = std::path::PathBuf::from(&debug_dir);
+    llm = llm.with_debug_dir(path);
+    let debug_dir_display = if debug_dir == "." { "当前目录" } else { &debug_dir };
+    eprintln!("[silences-server] API 调试日志目录: {debug_dir_display} -> api_debug.json");
     // 尝试加载 tokenizer（用于缓存 padding）
     let tokenizer_path = env::var("SILENCES_TOKENIZER")
         .unwrap_or_else(|_| "tokenizer/tokenizer.json".to_string());
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
         llm = llm.with_tokenizer(&tokenizer_path);
     }
 
-    // 项目根目录（可选，不设置则自动查找含 .git 的父目录）
+    // 项目根目录（可选，不设置则默认使用 cwd）
     let project_root = env::var("SILENCES_PROJECT_ROOT")
         .ok()
         .map(std::path::PathBuf::from);

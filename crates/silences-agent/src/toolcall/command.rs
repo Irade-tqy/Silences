@@ -115,5 +115,7 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         rollback: false,
     
         approval_pending: None,
-    })
+        inject_messages: vec![],
+            defer_rollback: false,
+        })
 }

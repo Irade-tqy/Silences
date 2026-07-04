@@ -7,13 +7,13 @@ use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use serde_json::Value;
 
-use super::{normalize, read_file_robust, InverseOp, ToolDef, ToolOutcome};
+use super::{expand_pattern, normalize, read_file_robust, InverseOp, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
         name: "replace",
         description:
-            "在指定路径下所有文本文件中搜索并替换正则表达式的所有匹配。\nwhy: 需要批量重命名或重构时使用。\nhow: 谨慎使用，影响范围大。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格。",
+            "在指定路径下所有文本文件中搜索并替换正则表达式的所有匹配。\nwhy: 需要批量重命名或重构时使用。\nhow: 全文匹配（不按行拆分），正则引擎为 fancy-regex，`(`, `)`, `*`, `+`, `.`, `[`, `]`, `{`, `}`, `^`, `$`, `\\` 均为元字符，需 `\\` 转义。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格。\n提示: 反引号内为纯文本，可与正则混写。如 `fn main()`*\n 匹配 \"fn main()\" 后跟正则 *\\n。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -23,7 +23,7 @@ pub fn tool() -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "正则表达式"
+                    "description": "正则表达式；反引号内纯文本，可混写。如 `fn()`abc"
                 },
                 "replacement": {
                     "type": "string",
@@ -39,10 +39,11 @@ pub fn tool() -> ToolDef {
 
 async fn execute(args: Value) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
-    let pattern_str = args["pattern"].as_str().context("缺少 pattern 参数")?;
+    let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let replacement = args["replacement"].as_str().context("缺少 replacement 参数")?;
 
-    let re = Regex::new(pattern_str).context("正则表达式无效")?;
+    let re_pattern = expand_pattern(raw_pattern);
+    let re = Regex::new(&re_pattern).context("正则表达式无效")?;
     let meta = fs::metadata(path).context("路径不存在")?;
 
     let mut changed_files: Vec<(String, String)> = Vec::new();
@@ -61,6 +62,8 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         rollback: false,
         
         approval_pending: None,
+            inject_messages: vec![],
+            defer_rollback: false,
         });
     }
 
@@ -86,8 +89,9 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
             },
         )),
         rollback: false,
-    
         approval_pending: None,
+        inject_messages: vec![],
+        defer_rollback: false,
     })
 }
 

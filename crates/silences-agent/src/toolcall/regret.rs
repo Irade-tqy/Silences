@@ -72,7 +72,9 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
         rollback: false,
                 
         approval_pending: None,
-                })
+                    inject_messages: vec![],
+            defer_rollback: false,
+        })
             })
         }),
     }

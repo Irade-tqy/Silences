@@ -5,6 +5,7 @@
 //!
 //! 参考 CodeWhale 的实践处理 DeepSeek v4 的流式响应格式。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -170,14 +171,37 @@ impl LlmClient {
     }
 
     /// 构建 API messages JSON（含工具调用）
+    ///
+    /// 自动清理孤立的 tool_calls：如果 assistant 消息中的某些 tool_call 在后续消息中
+    /// 没有对应的 tool_result，则将这些 tool_call 从消息中移除，避免 API 返回 400 错误。
     fn build_api_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
+        // 第一遍：收集所有有对应 tool_result 的 tool_call_id
+        let mut completed_ids: HashSet<&str> = HashSet::new();
+        for msg in messages {
+            if msg.role == "tool" {
+                if let Some(ref tcid) = msg.tool_call_id {
+                    completed_ids.insert(tcid.as_str());
+                }
+            }
+        }
+
         let mut api = Vec::new();
         if let Some(sys) = system {
             api.push(json!({"role": "system", "content": sys}));
         }
         for msg in messages {
-            // tool call 消息的 content 应为 null
-            let content_val = if msg.content.is_empty() && msg.tool_calls.is_some() {
+            // 检查此消息的 tool_calls 是否有孤立的（无对应 tool_result）
+            let all_tc_orphaned = msg.tool_calls.as_ref().map_or(false, |tc| {
+                tc.iter().all(|tc| !completed_ids.contains(tc.id.as_str()))
+            });
+
+            // 如果 assistant 消息的所有 tool_calls 都是孤立的且 content 为空，
+            // 直接跳过这条消息 —— 留它在消息列表中只会让 LLM 困惑
+            if msg.role == "assistant" && all_tc_orphaned && msg.content.is_empty() {
+                continue;
+            }
+
+            let content_val = if msg.content.is_empty() && msg.tool_calls.is_some() && !all_tc_orphaned {
                 Value::Null
             } else {
                 json!(msg.content)
@@ -187,7 +211,13 @@ impl LlmClient {
                 m["name"] = json!(name);
             }
             if let Some(ref tc) = msg.tool_calls {
-                m["tool_calls"] = json!(tc);
+                // 只保留有对应 tool_result 的 tool_call
+                let matched: Vec<_> = tc.iter().filter(|tc| completed_ids.contains(tc.id.as_str())).collect();
+                if !matched.is_empty() {
+                    m["tool_calls"] = json!(matched);
+                }
+                // 如果全部没有对应 tool_result（all_tc_orphaned=true 但 content 非空），
+                // 则不发送 tool_calls 字段，仅保留文本内容
             }
             if let Some(ref tcid) = msg.tool_call_id {
                 m["tool_call_id"] = json!(tcid);

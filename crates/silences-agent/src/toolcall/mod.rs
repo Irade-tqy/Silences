@@ -16,11 +16,13 @@ pub mod command;
 pub mod trash;
 pub mod start_task;
 pub mod end_task;
-pub mod present_task_list;
+pub mod add_task;
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
+
+use crate::queue::TaskQueue;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -60,6 +62,10 @@ pub struct ToolOutcome {
     pub rollback: bool,
     /// 若设置，表示需要用户审批，值为审批会话 ID
     pub approval_pending: Option<String>,
+    /// 工具执行后注入到对话中的额外消息（例如 end_task 注入 u_orch）
+    pub inject_messages: Vec<silences_core::Message>,
+    /// 延迟回退到下一轮（用于 end_task：先注入 inject_messages，等模型更新 CONTEXT.md 后再回退）
+    pub defer_rollback: bool,
 }
 
 impl fmt::Debug for ToolOutcome {
@@ -69,6 +75,8 @@ impl fmt::Debug for ToolOutcome {
             .field("inverse", &self.inverse.is_some())
             .field("rollback", &self.rollback)
             .field("approval_pending", &self.approval_pending.is_some())
+            .field("inject_messages", &self.inject_messages.len())
+            .field("defer_rollback", &self.defer_rollback)
             .finish()
     }
 }
@@ -118,6 +126,53 @@ pub fn normalize(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 展开 pattern 中的反引号转义区域：
+/// `` `literal text` `` → 内部自动 regex::escape（纯文本匹配）
+/// `\`` 在反引号区域内表示字面反引号
+/// 反引号外的部分保持原样（正则表达式）
+///
+/// 示例：
+/// `` `fn main()`*\n `` → 匹配 "fn main()" 后跟正则 `*\n`
+/// `` `def reg():` `` → 匹配字面 "def reg():"
+pub fn expand_pattern(pattern: &str) -> String {
+    let mut result = String::new();
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            // 进入纯文本区域：收集到未转义的反引号为止
+            let mut literal = String::new();
+            loop {
+                match chars.next() {
+                    None => {
+                        // 未闭合的反引号 — 当成字面量处理
+                        result.push('`');
+                        result.push_str(&literal);
+                        break;
+                    }
+                    Some('`') => {
+                        // 纯文本区域结束
+                        result.push_str(&regex::escape(&literal));
+                        break;
+                    }
+                    Some('\\') if chars.peek() == Some(&'`') => {
+                        // 转义的反引号 \`
+                        chars.next();
+                        literal.push('`');
+                    }
+                    Some(c) => {
+                        literal.push(c);
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 /// 编码鲁棒的文件读取函数。
@@ -262,7 +317,7 @@ pub fn auto_truncate(
 }
 
 /// 注册所有工具
-pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker) -> Vec<ToolDef> {
+pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker, queue: Arc<TaskQueue>) -> Vec<ToolDef> {
     vec![
         glance::tool(),
         grep::tool(),
@@ -276,9 +331,10 @@ pub fn all_tools(history: Arc<Mutex<ToolHistory>>, read_tracker: ReadTracker) ->
         regret::tool(history),
         command::tool(),
         trash::tool(),
-        start_task::tool(),
+        start_task::tool(queue.clone()),
         end_task::tool(),
-        present_task_list::tool(),
+        add_task::tool(queue),
+
     ]
 }
 

@@ -2,4 +2,5 @@
 
 pub mod agent;
 pub mod context;
+pub mod queue;
 pub mod toolcall;

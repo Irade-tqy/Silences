@@ -30,6 +30,7 @@ interface Message {
 }
 
 interface ToolCallEntry {
+  id?: string;
   name: string;
   args: string;
   result?: string;
@@ -107,8 +108,6 @@ export default function Page() {
   const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null });
   const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '' });
   const [settingsSaving, setSettingsSaving] = useState(false);
-  const [approvalPanel, setApprovalPanel] = useState<{ tasks: string; approvalId: string } | null>(null);
-  const [approvalFeedback, setApprovalFeedback] = useState('');
   const abortRef = useRef<AbortController | null>(null);
   const msgEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -277,42 +276,18 @@ export default function Page() {
           role: string;
           content: string;
           reasoning_content?: string;
-          tool_calls?: Array<{
-            id: string;
-            type: string;
-            function: { name: string; arguments: string };
-          }>;
-          tool_call_id?: string;
+          tool_calls?: Array<{ name: string; args: string; result?: string }>;
         }[] = await msgRes.json();
-
-        // 收集 tool 结果：tool_call_id → result content
-        const toolResults = new Map<string, string>();
-        for (const m of data) {
-          if (m.role === 'tool' && m.tool_call_id) {
-            toolResults.set(m.tool_call_id, m.content);
-          }
-        }
-
-        const msgs: Message[] = data
-          .filter(m => m.role === 'user' || m.role === 'assistant')
-          .map(m => {
-            const msg: Message = {
-              role: m.role as 'user' | 'assistant',
-              content: m.content,
-              reasoning: m.reasoning_content || undefined,
-            };
-            // 将后端的 tool_calls 转为前端 ToolCallEntry，附上对应的 tool 结果
-            if (m.tool_calls && m.tool_calls.length > 0) {
-              msg.toolCalls = m.tool_calls.map(tc => ({
-                name: tc.function.name,
-                args: tc.function.arguments,
-                result: toolResults.get(tc.id) || undefined,
-              }));
-            }
-            return msg;
-          });
+        // 后端已预处理：tool 结果已嵌入，无 tool 角色消息，直接渲染
+        const msgs: Message[] = data.map(m => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          reasoning: m.reasoning_content || undefined,
+          toolCalls: m.tool_calls && m.tool_calls.length > 0
+            ? m.tool_calls.map(tc => ({ name: tc.name, args: tc.args, result: tc.result }))
+            : undefined,
+        }));
         setMessages(msgs);
-        // 默认折叠所有推理块
         const collapsed: Record<number, boolean> = {};
         msgs.forEach((m, i) => { if (m.reasoning) collapsed[i] = true; });
         setCollapsedThinking(collapsed);
@@ -324,28 +299,11 @@ export default function Page() {
     } catch { /* ignore */ }
   }, [loading]);
 
-  // 将所有未闭合的 tool call 标记为已取消
-  const cancelPendingToolCalls = useCallback(() => {
-    setMessages(prev => prev.map(m => {
-      if (!m.toolCalls) return m;
-      const hasPending = m.toolCalls.some(tc => !tc.result);
-      if (!hasPending) return m;
-      return {
-        ...m,
-        toolCalls: m.toolCalls.map(tc => ({
-          ...tc,
-          result: tc.result || '⚠️ 已取消',
-        })),
-      };
-    }));
-  }, []);
-
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
     setInput('');
     setRoundUsage(null);
-    cancelPendingToolCalls();
 
     const userMsg: Message = { role: 'user', content: text };
     const placeholder: Message = { role: 'assistant', content: '', isStreaming: true };
@@ -413,78 +371,28 @@ export default function Page() {
                 loadSessions(); // 新会话立即出现在侧边栏
               }
             } else if (ev.type === 'text') {
-              setMessages(prev => {
-                const last = prev[prev.length - 1];
-                // 工具调用结束后，开启一条新消息
-                if (last && last.toolCalls) {
-                  reasoningBuf = '';
-                  const tail = prev.map((m, i) =>
-                    i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
-                  );
-                  return [...tail, { role: 'assistant', content: ev.content, isStreaming: true }];
-                }
-                return prev.map((m, i) =>
-                  i === prev.length - 1 && m.isStreaming
-                    ? { ...m, content: m.content + ev.content }
-                    : m
-                );
-              });
+              setMessages(prev => prev.map((m, i) =>
+                i === prev.length - 1 && m.isStreaming
+                  ? { ...m, content: m.content + ev.content }
+                  : m
+              ));
             } else if (ev.type === 'reasoning') {
+              setMessages(prev => prev.map((m, i) =>
+                i === prev.length - 1 && m.isStreaming
+                  ? { ...m, reasoning: (m.reasoning || '') + ev.content }
+                  : m
+              ));
+            } else if (ev.type === 'tool_call') {
               setMessages(prev => {
                 const last = prev[prev.length - 1];
-                // 工具调用结束后，开启一条新消息（带推理内容）
-                if (last && last.toolCalls) {
-                  reasoningBuf = ev.content;
-                  thinkingIdxRef.current = prev.length;
-                  const tail = prev.map((m, i) =>
-                    i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
-                  );
-                  return [...tail, { role: 'assistant', content: '', reasoning: ev.content, isStreaming: true }];
+                if (!last || !last.isStreaming) return prev;
+                const calls = last.toolCalls ? [...last.toolCalls] : [];
+                const idx = calls.findIndex(tc => tc.id === ev.id);
+                if (idx >= 0) {
+                  calls[idx] = { id: ev.id, name: ev.name, args: ev.args, result: ev.result || undefined };
+                } else {
+                  calls.push({ id: ev.id, name: ev.name, args: ev.args, result: ev.result || undefined });
                 }
-                reasoningBuf += ev.content;
-                return prev.map((m, i) =>
-                  i === prev.length - 1 && m.isStreaming
-                    ? { ...m, reasoning: (m.reasoning || '') + ev.content }
-                    : m
-                );
-              });
-            } else if (ev.type === 'tool_calling') {
-              setMessages(prev => {
-                const last = prev[prev.length - 1];
-                // 多条 tool call 追加到同一条消息
-                if (last && last.toolCalls) {
-                  return prev.map((m, i) =>
-                    i === prev.length - 1
-                      ? { ...m, toolCalls: [...(m.toolCalls || []), { name: ev.name, args: ev.args }] }
-                      : m
-                  );
-                }
-                // 首次 tool call：结束上一条流式消息，开启工具卡片消息
-                // 同时自动折叠刚完成的推理块
-                const ti = thinkingIdxRef.current;
-                if (ti !== null) {
-                  setCollapsedThinking(prev => ({ ...prev, [ti]: true }));
-                  thinkingIdxRef.current = null;
-                }
-                reasoningBuf = '';
-                const tail = prev.map((m, i) =>
-                  i === prev.length - 1 && m.isStreaming
-                    ? { ...m, isStreaming: false }
-                    : m
-                );
-                return [...tail, {
-                  role: 'assistant' as const,
-                  content: '',
-                  isStreaming: true,
-                  toolCalls: [{ name: ev.name, args: ev.args }],
-                }];
-              });
-            } else if (ev.type === 'tool_result') {
-              setMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (!last || !last.isStreaming || !last.toolCalls) return prev;
-                const calls = [...last.toolCalls];
-                if (calls.length > 0) calls[calls.length - 1] = { ...calls[calls.length - 1], result: ev.summary };
                 return prev.map((m, i) =>
                   i === prev.length - 1 ? { ...m, toolCalls: calls } : m
                 );
@@ -499,14 +407,21 @@ export default function Page() {
                 cache_miss_tokens: prev.cache_miss_tokens + u.cache_miss_tokens,
                 cost_yuan: prev.cost_yuan + u.cost_yuan,
               } : u);
-            } else if (ev.type === 'pending_approval') {
-              setLoading(false);
-              setApprovalPanel({ tasks: ev.tasks, approvalId: ev.approval_id });
-              // 结束最后一条流式消息
-              setMessages(prev => prev.map((m, i) =>
+            } else if (ev.type === 'message_boundary' || ev.type === 'context_rollback') {
+              setMessages(prev => {
+                const tail = prev.map((m, i) =>
+                  i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
+                );
+                return [...tail, { role: 'assistant', content: '', isStreaming: true }];
+              });
+            } else if (ev.type === 'message_boundary' || ev.type === 'context_rollback') {
+            setMessages(prev => {
+              const tail = prev.map((m, i) =>
                 i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
-              ));
-            } else if (ev.type === 'error') {
+              );
+              return [...tail, { role: 'assistant', content: '', isStreaming: true }];
+            });
+          } else if (ev.type === 'error') {
               setMessages(prev => prev.map((m, i) =>
                 i === prev.length - 1 && m.isStreaming
                   ? { ...m, content: m.content + `\n⚠️ ${ev.message}`, isStreaming: false }
@@ -543,83 +458,23 @@ export default function Page() {
       setLoading(false);
       abortRef.current = null;
     }
-  }, [input, loading, activeId, loadSessions, cancelPendingToolCalls]);
+  }, [input, loading, activeId, loadSessions]);
 
   const stopGeneration = useCallback(() => {
+    // 先通知后端停止 agent 运行
+    if (activeId) {
+      fetch(`${API}/sessions/${activeId}/stop`, { method: 'POST' }).catch(() => {});
+    }
+    // 再中止前端 fetch 流
     if (abortRef.current) {
       abortRef.current.abort();
       setMessages(prev => prev.map((m, i) =>
         i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
       ));
     }
-  }, []);
+  }, [activeId]);
 
-  const handleApprove = useCallback(async () => {
-    if (!approvalPanel || !activeId) return;
-    setApprovalPanel(null);
-    // 发送审批通过 + 启动新 agent
-    const text = '审批通过，开始执行任务';
-    const userMsg: Message = { role: 'user', content: text };
-    const placeholder: Message = { role: 'assistant', content: '', isStreaming: true };
-    setMessages(prev => [...prev, userMsg, placeholder]);
-    setLoading(true);
-
-    try {
-      const res = await fetch(`${API}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          approval_id: approvalPanel.approvalId,
-          session_id: activeId,
-          approved: true,
-        }),
-      });
-      if (res.ok) startSSEStream(res, activeId);
-      else throw new Error(await res.text());
-    } catch (err) {
-      setMessages(prev => prev.map((m, i) =>
-        i === prev.length - 1 && m.isStreaming
-          ? { role: 'assistant', content: `审批请求失败: ${err}`, isStreaming: false }
-          : m
-      ));
-      setLoading(false);
-    }
-  }, [approvalPanel, activeId]);
-
-  const handleReject = useCallback(async () => {
-    if (!approvalPanel || !activeId) return;
-    const feedback = approvalFeedback.trim() || '请重新拆分任务';
-    setApprovalPanel(null);
-    setApprovalFeedback('');
-    const userMsg: Message = { role: 'user', content: `驳回: ${feedback}` };
-    const placeholder: Message = { role: 'assistant', content: '', isStreaming: true };
-    setMessages(prev => [...prev, userMsg, placeholder]);
-    setLoading(true);
-
-    try {
-      const res = await fetch(`${API}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          approval_id: approvalPanel.approvalId,
-          session_id: activeId,
-          approved: false,
-          feedback,
-        }),
-      });
-      if (res.ok) startSSEStream(res, activeId);
-      else throw new Error(await res.text());
-    } catch (err) {
-      setMessages(prev => prev.map((m, i) =>
-        i === prev.length - 1 && m.isStreaming
-          ? { role: 'assistant', content: `审批请求失败: ${err}`, isStreaming: false }
-          : m
-      ));
-      setLoading(false);
-    }
-  }, [approvalPanel, activeId, approvalFeedback]);
-
-  // 提取 SSE 流处理为独立函数（approve 和 chat 复用）
+  // 提取 SSE 流处理为独立函数（chat 和重连复用）
   const startSSEStream = useCallback(async (res: Response, sid: string) => {
     const reader = res.body?.getReader();
     if (!reader) { setLoading(false); return; }
@@ -648,30 +503,15 @@ export default function Page() {
           if (ev.type === 'session') {
             if (!activeId) { setActiveId(ev.id); loadSessions(); }
           } else if (ev.type === 'text') {
-            setMessages(prev => {
-              const last = prev[prev.length - 1];
-              if (last && last.toolCalls) {
-                reasoningBuf = '';
-                return [...prev.map((m, i) => i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m),
-                  { role: 'assistant', content: ev.content, isStreaming: true }];
-              }
-              return prev.map((m, i) =>
-                i === prev.length - 1 && m.isStreaming ? { ...m, content: m.content + ev.content } : m
-              );
-            });
+            setMessages(prev => prev.map((m, i) =>
+              i === prev.length - 1 && m.isStreaming ? { ...m, content: m.content + ev.content } : m
+            ));
+
           } else if (ev.type === 'reasoning') {
-            setMessages(prev => {
-              const last = prev[prev.length - 1];
-              if (last && last.toolCalls) {
-                reasoningBuf = ev.content;
-                return [...prev.map((m, i) => i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m),
-                  { role: 'assistant', content: '', reasoning: ev.content, isStreaming: true }];
-              }
-              reasoningBuf += ev.content;
-              return prev.map((m, i) =>
-                i === prev.length - 1 && m.isStreaming ? { ...m, reasoning: (m.reasoning || '') + ev.content } : m
-              );
-            });
+            setMessages(prev => prev.map((m, i) =>
+              i === prev.length - 1 && m.isStreaming ? { ...m, reasoning: (m.reasoning || '') + ev.content } : m
+            ));
+
           } else if (ev.type === 'tool_calling') {
             setMessages(prev => {
               const last = prev[prev.length - 1];
@@ -704,12 +544,6 @@ export default function Page() {
               cache_miss_tokens: prev.cache_miss_tokens + u.cache_miss_tokens,
               cost_yuan: prev.cost_yuan + u.cost_yuan,
             } : u);
-          } else if (ev.type === 'pending_approval') {
-            setLoading(false);
-            setApprovalPanel({ tasks: ev.tasks, approvalId: ev.approval_id });
-            setMessages(prev => prev.map((m, i) =>
-              i === prev.length - 1 && m.isStreaming ? { ...m, isStreaming: false } : m
-            ));
           }
         } catch { /* skip */ }
       }
@@ -987,51 +821,6 @@ export default function Page() {
         </div>
 
       </div>
-
-      {/* ─── 审批面板 ─── */}
-      {approvalPanel && (
-        <div className="settings-overlay">
-          <div className="settings-modal" onClick={e => e.stopPropagation()} style={{ width: 520 }}>
-            <div className="settings-modal-header">
-              <span>审批任务列表</span>
-              <button className="settings-close-btn" onClick={() => { setApprovalPanel(null); setApprovalFeedback(''); }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
-            </div>
-            <div className="settings-modal-body">
-              <pre style={{
-                background: 'var(--ds-bg-code)', borderRadius: 8, padding: 12,
-                fontSize: 13, lineHeight: 1.5, overflow: 'auto', maxHeight: 300,
-                color: 'var(--ds-label-primary)', margin: '0 0 16px 0',
-              }}>
-                {(() => {
-                  try {
-                    const tasks = JSON.parse(approvalPanel.tasks);
-                    return tasks.map((t: {id: string, description: string}, i: number) =>
-                      `${i + 1}. [${t.id}] ${t.description}`
-                    ).join('\n');
-                  } catch { return approvalPanel.tasks; }
-                })()}
-              </pre>
-              <textarea
-                className="settings-textarea"
-                placeholder="驳回时填写反馈意见（可选）"
-                rows={3}
-                value={approvalFeedback}
-                onChange={e => setApprovalFeedback(e.target.value)}
-              />
-            </div>
-            <div className="settings-modal-footer">
-              <button className="settings-cancel-btn" onClick={handleReject} disabled={loading}>驳回</button>
-              <button className="settings-save-btn" onClick={handleApprove} disabled={loading}>
-                {loading ? '处理中...' : '批准'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ─── 设置遮罩 ─── */}
       {settingsOpen && (

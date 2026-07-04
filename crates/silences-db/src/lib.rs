@@ -66,7 +66,10 @@ impl Db {
         let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN reasoning_content TEXT;");
         let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN tool_calls TEXT;");
         let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN tool_call_id TEXT;");
+        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN name TEXT;");
         let _ = self.conn.execute_batch("ALTER TABLE sessions ADD COLUMN name TEXT;");
+        // v3: hidden 列 — 回滚时标记为隐藏，避免下一次加载旧工具细节
+        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;");
         Ok(())
     }
 
@@ -125,16 +128,18 @@ impl Db {
         let now = chrono::Utc::now().to_rfc3339();
         let tool_calls_json = msg.tool_calls.as_ref().map(|tc| serde_json::to_string(tc).unwrap());
         self.conn.execute(
-            "INSERT INTO messages (session_id, role, content, reasoning_content, tool_calls, tool_call_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![session_id, msg.role, msg.content, msg.reasoning_content, tool_calls_json, msg.tool_call_id, now],
+            "INSERT INTO messages (session_id, role, name, content, reasoning_content, tool_calls, tool_call_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![session_id, msg.role, msg.name, msg.content, msg.reasoning_content, tool_calls_json, msg.tool_call_id, now],
         )?;
         Ok(())
     }
 
-    /// 获取会话的所有消息
+    /// 获取会话的所有可见消息（排除 hidden=1 的回滚消息）
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content, reasoning_content, tool_calls, tool_call_id FROM messages WHERE session_id = ?1 ORDER BY id",
+            "SELECT role, content, reasoning_content, tool_calls, tool_call_id, name
+             FROM messages WHERE session_id = ?1 AND (hidden IS NULL OR hidden=0)
+             ORDER BY id",
         )?;
         let msgs = stmt
             .query_map(rusqlite::params![session_id], |row| {
@@ -145,13 +150,36 @@ impl Db {
                     role: row.get(0)?,
                     content: row.get(1)?,
                     reasoning_content: row.get(2)?,
-                    name: None,
+                    name: row.get(5)?,
                     tool_calls,
                     tool_call_id: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(msgs)
+    }
+
+    /// 隐藏此会话中所有 id > after_id 且尚未隐藏的消息
+    pub fn hide_messages_after(&self, session_id: &str, after_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET hidden=1 WHERE session_id=?1 AND id>?2 AND (hidden IS NULL OR hidden=0)",
+            rusqlite::params![session_id, after_id],
+        )?;
+        Ok(())
+    }
+
+    /// 获取此会话当前的最大消息 ID（用于回滚边界定位）
+    pub fn get_max_message_id(&self, session_id: &str) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT MAX(id) FROM messages WHERE session_id=?1",
+        )?;
+        let result = stmt.query_row(rusqlite::params![session_id], |row| row.get(0));
+        match result {
+            Ok(Some(id)) => Ok(Some(id)),
+            Ok(None) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ── Token 用量 ──

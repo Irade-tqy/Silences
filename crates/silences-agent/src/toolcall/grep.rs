@@ -6,13 +6,13 @@ use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use serde_json::Value;
 
-use super::{normalize, read_file_robust, ToolDef, ToolOutcome};
+use super::{expand_pattern, normalize, read_file_robust, ToolDef, ToolOutcome};
 
 pub fn tool() -> ToolDef {
     ToolDef {
         name: "grep",
         description:
-            "在指定路径下搜索正则表达式匹配。每个匹配返回上下文三行。将会跳过隐藏目录、node_modules、target。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。",
+            "在指定路径下搜索正则表达式匹配。每个匹配返回上下文三行。将会跳过隐藏目录、node_modules、target。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\n提示: 反引号内的内容自动转义为纯文本，可与正则混写。如 `fn main()`*\n 匹配 \"fn main()\" 后跟正则 *\\n。\\` 在反引号内表示字面反引号。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -22,7 +22,7 @@ pub fn tool() -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "正则表达式"
+                    "description": "正则表达式；反引号内为纯文本，可混写。如 `fn()`abc 匹配 \"fn()\" + 正则 abc"
                 }
             },
             "required": ["path", "pattern"],
@@ -34,8 +34,9 @@ pub fn tool() -> ToolDef {
 
 async fn execute(args: Value) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
-    let pattern_str = args["pattern"].as_str().context("缺少 pattern 参数")?;
-    let re = Regex::new(pattern_str).context("正则表达式无效")?;
+    let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
+    let re_pattern = expand_pattern(raw_pattern);
+    let re = Regex::new(&re_pattern).context("正则表达式无效")?;
 
     let meta = fs::metadata(path).context("路径不存在")?;
 
@@ -48,17 +49,19 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
 
     if results.is_empty() {
         Ok(ToolOutcome {
-            summary: format!("grep: 无匹配 \"{}\"", pattern_str),
+            summary: format!("grep: 无匹配 \"{}\"", raw_pattern),
             inverse: None,
         
         rollback: false,
         
         approval_pending: None,
+            inject_messages: vec![],
+            defer_rollback: false,
         })
     } else {
         let summary = format!(
             "grep \"{}\" 匹配 {} 处:\n{}",
-            pattern_str,
+            raw_pattern,
             results.len(),
             results.join("\n---\n")
         );
@@ -69,6 +72,8 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
         rollback: false,
         
         approval_pending: None,
+            inject_messages: vec![],
+            defer_rollback: false,
         })
     }
 }
@@ -97,20 +102,24 @@ fn search_file(path: &str, re: &Regex, results: &mut Vec<String>) -> Result<()> 
     };
 
     let lines: Vec<&str> = content.lines().collect();
+    let mut file_parts = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if re.is_match(line).unwrap_or(false) {
             let start = i.saturating_sub(3);
             let end = (i + 4).min(lines.len());
             let mut ctx = Vec::new();
-            ctx.push(format!("{}:{}\t{}", path, i + 1, line));
+            ctx.push(format!("{}  {}", i + 1, line));
             for j in start..i {
-                ctx.push(format!("  {}>{} {}", path, j + 1, lines[j]));
+                ctx.push(format!("  {}  {}", j + 1, lines[j]));
             }
             for j in (i + 1)..end {
-                ctx.push(format!("  {}<{} {}", path, j + 1, lines[j]));
+                ctx.push(format!("  {}  {}", j + 1, lines[j]));
             }
-            results.push(ctx.join("\n"));
+            file_parts.push(ctx.join("\n"));
         }
+    }
+    if !file_parts.is_empty() {
+        results.push(format!("[{}]\n{}", path, file_parts.join("\n---\n")));
     }
     Ok(())
 }

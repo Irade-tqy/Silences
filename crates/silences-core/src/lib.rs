@@ -71,6 +71,13 @@ impl Message {
     }
 }
 
+/// 任务项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskItem {
+    pub id: String,
+    pub description: String,
+}
+
 /// Tool call（DeepSeek / OpenAI 格式）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallValue {
@@ -134,7 +141,61 @@ pub fn compute_cost(_input: u32, output: u32, cache_hit: u32, cache_miss: u32) -
     hit_cost + miss_cost + out_cost
 }
 
-/// SSE 事件类型（server → CLI）
+/// 前端渲染用消息（tool_results 已嵌入，无 tool 角色消息）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_calls: Option<Vec<ViewToolCall>>,
+}
+
+/// 前端渲染用工具调用（结果已嵌入）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewToolCall {
+    pub name: String,
+    pub args: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub result: Option<String>,
+}
+
+/// 将原始消息列表转换为前端渲染格式：
+/// 1. 过滤 tool 角色消息
+/// 2. 将 tool_result 嵌入到对应 assistant 消息的 tool_calls 中
+pub fn messages_to_view(msgs: Vec<Message>) -> Vec<ViewMessage> {
+    // 收集 tool_call_id → content 映射（克隆字符串避免借用冲突）
+    let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for msg in &msgs {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                results.insert(id.clone(), msg.content.clone());
+            }
+        }
+    }
+
+    msgs.into_iter()
+        .filter(|m| m.role != "tool")
+        .map(|m| {
+            let tool_calls = m.tool_calls.map(|tc| {
+                tc.into_iter().map(|tc| ViewToolCall {
+                    name: tc.function.name,
+                    args: tc.function.arguments,
+                    result: results.get(&tc.id).cloned(),
+                }).collect()
+            });
+            ViewMessage {
+                role: m.role,
+                content: m.content,
+                reasoning_content: m.reasoning_content,
+                tool_calls,
+            }
+        })
+        .collect()
+}
+
+/// SSE 事件类型（server → 前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SseEvent {
@@ -150,15 +211,15 @@ pub enum SseEvent {
     /// Token 用量
     #[serde(rename = "usage")]
     Usage(TokenUsage),
-    /// 工具调用
-    #[serde(rename = "tool_calling")]
-    ToolCalling { name: String, args: String },
-    /// 工具结果
-    #[serde(rename = "tool_result")]
-    ToolResult { name: String, summary: String },
-    /// 等待用户审批
-    #[serde(rename = "pending_approval")]
-    PendingApproval { tasks: String, approval_id: String },
+    /// 工具调用（result 为 None 表示执行中，Some 表示已完成）
+    #[serde(rename = "tool_call")]
+    ToolCall { id: String, name: String, args: String, result: Option<String> },
+    /// 消息边界：前端应关闭当前流式消息并开启新消息
+    #[serde(rename = "message_boundary")]
+    MessageBoundary,
+    /// 上下文回退（兼作消息边界）
+    #[serde(rename = "context_rollback")]
+    ContextRollback,
     /// 错误
     #[serde(rename = "error")]
     Error { message: String },
@@ -188,6 +249,8 @@ fn default_true() -> bool { true }
 pub struct Settings {
     pub api_key: Option<String>,
     pub system_prompt: Option<String>,
+    /// 每轮 tool loop 延迟（毫秒），用于调试慢速观察
+    pub tool_delay_ms: u64,
 }
 
 /// 更新设置的请求体
@@ -195,4 +258,7 @@ pub struct Settings {
 pub struct SettingsUpdate {
     pub api_key: Option<String>,
     pub system_prompt: Option<String>,
+    /// 每轮 tool loop 延迟（毫秒），传递 0 或 None 表示不延迟
+    #[serde(default)]
+    pub tool_delay_ms: Option<u64>,
 }

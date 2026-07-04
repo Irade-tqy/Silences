@@ -68,6 +68,8 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
         rollback: false,
 
         approval_pending: None,
+            inject_messages: vec![],
+            defer_rollback: false,
         });
     }
 
@@ -123,5 +125,7 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
         rollback: false,
 
         approval_pending: None,
-    })
+        inject_messages: vec![],
+            defer_rollback: false,
+        })
 }
