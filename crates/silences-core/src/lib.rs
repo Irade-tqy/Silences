@@ -228,6 +228,10 @@ pub struct ToolLimits {
     pub command_stderr_max_tok: usize,
     /// glance 读取文件头部注释的最大行数（超出给出提示）
     pub glance_max_comment_lines: usize,
+    /// grep 摘要最多显示多少条匹配（超出后截断，完整内容存 console 文件）
+    pub grep_max_shown_matches: usize,
+    /// grep 匹配行上下各显示多少行作为上下文
+    pub grep_context_lines: usize,
 }
 
 impl Default for ToolLimits {
@@ -236,6 +240,8 @@ impl Default for ToolLimits {
             command_stdout_max_tok: 2000,
             command_stderr_max_tok: 1000,
             glance_max_comment_lines: 20,
+            grep_max_shown_matches: 20,
+            grep_context_lines: 2,
         }
     }
 }

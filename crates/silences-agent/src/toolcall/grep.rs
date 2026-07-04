@@ -13,14 +13,13 @@ use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use serde_json::Value;
 
+use silences_core::ToolLimits;
+
 use super::{expand_pattern, normalize, read_file_robust, ToolDef, ToolOutcome};
 
 static GREP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// 最大显示条数
-const MAX_SHOWN_MATCHES: usize = 20;
-
-pub fn tool(console_dir: Option<PathBuf>) -> ToolDef {
+pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "grep",
         description:
@@ -47,12 +46,12 @@ pub fn tool(console_dir: Option<PathBuf>) -> ToolDef {
         }),
         handler: Box::new(move |args| {
             let cd = console_dir.clone();
-            Box::pin(execute(args, cd))
+            Box::pin(execute(args, cd, limits))
         }),
     }
 }
 
-async fn execute(args: Value, console_dir: Option<PathBuf>) -> Result<ToolOutcome> {
+async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let extensions: HashSet<String> = args["extensions"]
@@ -73,9 +72,9 @@ async fn execute(args: Value, console_dir: Option<PathBuf>) -> Result<ToolOutcom
     // (格式化输出, 该文件内的匹配条数)
     let mut results: Vec<(String, usize)> = Vec::new();
     if meta.is_dir() {
-        search_dir(path, &re, &extensions, &mut results)?;
+        search_dir(path, &re, &extensions, &mut results, limits.grep_context_lines)?;
     } else {
-        search_file(path, &re, &mut results)?;
+        search_file(path, &re, &mut results, limits.grep_context_lines)?;
     }
 
     if results.is_empty() {
@@ -96,7 +95,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>) -> Result<ToolOutcom
         .collect::<Vec<_>>()
         .join("\n---\n");
 
-    if total_matches <= MAX_SHOWN_MATCHES {
+    if total_matches <= limits.grep_max_shown_matches {
         // 没超限，正常返回全部结果
         return Ok(ToolOutcome {
             summary: format!("grep \"{}\" 匹配 {} 处:\n{}", raw_pattern, total_matches, summary_text),
@@ -108,11 +107,11 @@ async fn execute(args: Value, console_dir: Option<PathBuf>) -> Result<ToolOutcom
         });
     }
 
-    // 超过 20 条：摘要只显示前 20 条
+    // 超过上限：摘要只显示前 N 条
     let mut truncated = Vec::new();
     let mut shown = 0;
     for (text, count) in &results {
-        if shown >= MAX_SHOWN_MATCHES {
+        if shown >= limits.grep_max_shown_matches {
             break;
         }
         truncated.push(text.as_str());
@@ -140,7 +139,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>) -> Result<ToolOutcom
     Ok(ToolOutcome {
         summary: format!(
             "grep \"{}\" 匹配 {} 处（显示前 {} 条）:\n{}{}",
-            raw_pattern, total_matches, MAX_SHOWN_MATCHES,
+            raw_pattern, total_matches, limits.grep_max_shown_matches,
             truncated.join("\n---\n"),
             suffix,
         ),
@@ -157,6 +156,7 @@ fn search_dir(
     re: &Regex,
     exts: &HashSet<String>,
     results: &mut Vec<(String, usize)>,
+    context_lines: usize,
 ) -> Result<()> {
     for entry in fs::read_dir(dir).context("读取目录失败")? {
         let entry = entry?;
@@ -165,7 +165,7 @@ fn search_dir(
         if path.is_dir() {
             // 安全兜底：跳过隐藏目录、node_modules、target、tokenizer
             if !name.starts_with('.') && name != "node_modules" && name != "target" && name != "tokenizer" {
-                search_dir(&path.to_string_lossy(), re, exts, results)?;
+                search_dir(&path.to_string_lossy(), re, exts, results, context_lines)?;
             }
         } else {
             // 安全兜底：跳过调试日志文件，避免自引用循环
@@ -175,7 +175,7 @@ fn search_dir(
             // 白名单检查：只搜指定扩展名
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if exts.contains(&ext.to_lowercase()) {
-                    search_file(&path.to_string_lossy(), re, results)?;
+                    search_file(&path.to_string_lossy(), re, results, context_lines)?;
                 }
             }
         }
@@ -184,7 +184,7 @@ fn search_dir(
 }
 
 /// 搜索单个文件，如果匹配则 push (formatted_text, match_count) 到 results
-fn search_file(path: &str, re: &Regex, results: &mut Vec<(String, usize)>) -> Result<()> {
+fn search_file(path: &str, re: &Regex, results: &mut Vec<(String, usize)>, context_lines: usize) -> Result<()> {
     let content = match read_file_robust(path) {
         Ok(c) => normalize(&c),
         Err(_) => return Ok(()), // 二进制文件跳过
@@ -194,8 +194,8 @@ fn search_file(path: &str, re: &Regex, results: &mut Vec<(String, usize)>) -> Re
     let mut file_parts = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if re.is_match(line).unwrap_or(false) {
-            let start = i.saturating_sub(2);
-            let end = (i + 3).min(lines.len());
+            let start = i.saturating_sub(context_lines);
+            let end = (i + context_lines + 1).min(lines.len());
             let mut ctx = Vec::new();
             ctx.push(format!("{}  {}", i + 1, line));
             for j in start..i {

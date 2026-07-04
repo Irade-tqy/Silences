@@ -353,7 +353,7 @@ pub fn all_tools(
     let console_dir = session_dir.as_ref().map(|d| d.join("console"));
     vec![
         glance::tool(limits),
-        grep::tool(console_dir.clone()),
+        grep::tool(console_dir.clone(), limits),
         read::tool(read_tracker.clone()),
         raw_read::tool(read_tracker.clone()),
         write::tool(read_tracker),
