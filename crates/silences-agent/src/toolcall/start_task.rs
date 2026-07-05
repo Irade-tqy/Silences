@@ -11,17 +11,17 @@ use crate::queue::TaskQueue;
 pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
     ToolDef {
         name: "start_task",
-        description: "从队列中取出并开始执行一个指定的任务。\nwhy: 标记工作开始，系统会从队列中移除该任务。\nhow: 提供 task_id 指定要执行的任务。如果队列中不存在该 ID 将报错。[不可撤销]",
+        description: "开始执行指定任务[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "任务 ID，必须已在队列中"
+                    "description": "已 add 的任务 ID"
                 },
                 "description": {
                     "type": "string",
-                    "description": "当前任务的目标描述"
+                    "description": "当前任务描述"
                 }
             },
             "required": ["task_id"],
@@ -37,6 +37,7 @@ pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
                 let queue_status = if q.is_empty() { "队列已空" } else { "队列中还有任务" };
 
                 if removed.is_some() {
+                    q.set_active(&task_id, desc);
                     let summary = format!("[开始任务] {}: {} ({})", task_id, desc, queue_status);
                     eprintln!("{summary}");
                     Ok(ToolOutcome {

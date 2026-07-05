@@ -53,7 +53,7 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
     ToolDef {
         name: "regret",
         description:
-            "撤销上一个工具调用的结果。\nwhy: 当操作结果不符合预期时调用。\nhow: 最多连续撤销 5 次。不支持撤销 command 的结果。[不可撤销]",
+            "撤销上一个工具的结果。\nwhy: 操作不符合预期时回退[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {},

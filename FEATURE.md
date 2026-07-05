@@ -136,7 +136,7 @@ Tertiary:  CLI (raw stdin/stdout)  # 脚本调用、管道
 
 ### 3.3 Plugin 系统
 
-**唯一接口**：MCP 协议（Model Context Protocol）
+接口：MCP 协议（Model Context Protocol）、Skills
 - 不加私有 plugin 格式
 - MCP server 跑在子进程中，崩溃不影响主进程
 - Plugin 有资源限额（内存、调用频率、总耗时）
@@ -203,7 +203,7 @@ sessions/
 - [x] Rust 项目结构搭建
 - [x] `silences-core`: 基础类型定义
 - [x] `silences-llm`: DeepSeek provider（流式调用）
-- [x] CLI 前端：stdin/stdout 极简对话
+- [x] GUI 前端：极简对话
 - [x] 基本的 prompt 配置（项目级+用户级）
 - [x] 会话管理 + SQLite 持久化
 - [x] Token 用量追踪 + 成本计算
@@ -224,10 +224,11 @@ sessions/
 
 ### v0.3 — 上下文与成本（待开始）
 
-- [ ] `silences-context`: 前缀缓存管理
-- [ ] Token 计数优化、成本跟踪完善
-- [ ] Cost 仪表盘
-- [ ] 上限保护
+- [x] 任务列表机制+上下文回滚
+- [x] Token 计数优化、成本跟踪完善
+- [x] Cost 仪表盘
+- [ ] 侧边栏手术刀管理上下文
+- [ ] 模型自驱动管理（fork 进行尝试）
 
 ### v0.4 — MCP 插件（待开始）
 
@@ -243,12 +244,6 @@ sessions/
 - [ ] 跑 CodeWhale baseline
 - [ ] 跑 Silences baseline → 对比
 
-### v0.6 — TUI 前端（待开始）
-
-- [ ] ratatui TUI：极简模式
-- [ ] 流式输出渲染
-- [ ] 可观察/可停止
-
 ---
 
 ## 6. 参考目标
@@ -257,7 +252,6 @@ sessions/
 |------|------|---------|
 | Debug 场景 cost | ≤ CC | Benchmark v0.4 |
 | Feature 场景 cost | ≤ CC | Benchmark v0.6 |
-| 首 token 延迟 | ≤ 1s | 端到端测量 |
 | 框架 overhead | ≤ 5% API 时间 | 对比纯 curl 调用 |
 | Windows 运行 | 原生体验 | CI 跑 Windows runner |
-| 缓存命中率 | ≥ 70% 稳态 | 会话摘要输出 |
+| 缓存命中率 | ≥ 90% 稳态 | 会话摘要输出 |

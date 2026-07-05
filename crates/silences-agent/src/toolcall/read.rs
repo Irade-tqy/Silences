@@ -19,7 +19,7 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
     ToolDef {
         name: "read",
         description:
-            "读取文件内容。\nwhy: 需要查看代码或文件的内容时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文；raw=true 显示原始格式（不标准化）。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格展示。需要原始格式请设置 raw=true。[不可撤销]",
+            "读取文件[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -29,19 +29,19 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
                 },
                 "all": {
                     "type": "boolean",
-                    "description": "是否读取全部内容（默认 false，大文件自动截断）"
+                    "description": "是否关闭大文件自动截断（默认 false）"
                 },
                 "start_line": {
                     "type": "integer",
-                    "description": "起始行号（1-based，可选，默认 1）"
+                    "description": "起始行号（1-based，默认 1）"
                 },
                 "end_line": {
                     "type": "integer",
-                    "description": "结束行号（1-based，可选，默认末尾）"
+                    "description": "结束行号（1-based，默认末尾）"
                 },
                 "raw": {
                     "type": "boolean",
-                    "description": "true=显示原始格式，不执行 CRLF/Tab 标准化（默认 false）"
+                    "description": "true=不执行 CRLF/Tab 标准化（默认 false）"
                 }
             },
             "required": ["path"],

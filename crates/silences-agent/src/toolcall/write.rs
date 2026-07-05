@@ -16,7 +16,7 @@ pub fn tool() -> ToolDef {
     ToolDef {
         name: "write",
         description:
-            "创建新文件或覆写已有文件。\nwhy: 需要生成新代码或修改已有文件时使用。\nhow: 文件存在时直接覆写，可通过 regret 恢复原文。[可撤销]",
+            "创建新文件或覆写已有文件[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -26,7 +26,7 @@ pub fn tool() -> ToolDef {
                 },
                 "content": {
                     "type": "string",
-                    "description": "文件内容"
+                    "description": "新文件内容"
                 }
             },
             "required": ["path", "content"],

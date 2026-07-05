@@ -40,17 +40,17 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "command",
         description:
-            "what: 在 PowerShell 中执行命令。\nwhy: 需要运行脚本、编译、测试等操作时使用。\nhow: 如删除请用 trash 代替。[不可撤销]",
+            "在 PowerShell 7.6 中执行命令，返回退出码、stdout 和 stderr\nhow: 用 `;` 而非 `&&`；管道不传文本[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "要执行的 PowerShell 命令"
+                    "description": "要执行的命令"
                 },
                 "work_dir": {
                     "type": "string",
-                    "description": "工作目录的绝对路径（可选，默认项目根目录）"
+                    "description": "工作目录的绝对路径（默认项目根目录）"
                 }
             },
             "required": ["command"],
@@ -67,7 +67,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let command = args["command"].as_str().context("缺少 command 参数")?;
     let work_dir = args["work_dir"].as_str().map(|s| s.to_string());
 
-    let output = tokio::process::Command::new("powershell")
+    let output = tokio::process::Command::new("pwsh")
         .args(["-NoProfile", "-Command", command])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

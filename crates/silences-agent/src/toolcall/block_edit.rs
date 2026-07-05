@@ -23,7 +23,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "block_edit",
         description:
-            "将文件中起始行到结束行之间的内容替换为指定文本。\nwhy: 需要替换跨多行的代码块、配置段或标记区域时使用。\nhow: start 匹配起始行，end 匹配结束行（纯文本 line.contains 匹配），替换 start-end 之间的全部内容。\ninclude_start/include_end 控制是否保留边界行。line 参数辅助多配对消歧。raw=true 保持原始格式。\n匹配失败时显示最近似的位置。[可撤销]",
+            "将文件中起始行到结束行之间的内容替换为指定文本，匹配失败时显示最近似的位置。\nwhy: 替换跨多行的代码块[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -33,31 +33,31 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "start": {
                     "type": "string",
-                    "description": "起始行匹配文本（line.contains 纯文本匹配）"
+                    "description": "起始行匹配文本"
                 },
                 "end": {
                     "type": "string",
-                    "description": "结束行匹配文本（line.contains 纯文本匹配）"
+                    "description": "结束行匹配文本"
                 },
                 "replacement": {
                     "type": "string",
-                    "description": "替换内容（多行文本，用 \\n 换行）"
+                    "description": "替换内容"
                 },
                 "include_start": {
                     "type": "boolean",
-                    "description": "替换范围是否包含起始行（默认 true）"
+                    "description": "是否替换起始行（默认 true）"
                 },
                 "include_end": {
                     "type": "boolean",
-                    "description": "替换范围是否包含结束行（默认 true）"
+                    "description": "是否替换结束行（默认 true）"
                 },
                 "line": {
                     "type": "integer",
-                    "description": "辅助选择：当存在多对 start-end 时，取 (start行+end行)/2 最接近此行的配对"
+                    "description": "取 (start行+end行)/2 最接近此行的匹配"
                 },
                 "raw": {
                     "type": "boolean",
-                    "description": "true=不执行 CRLF/Tab 标准化，保持原始格式（默认 false）"
+                    "description": "true=不执行 CRLF/Tab 标准化（默认 false）"
                 }
             },
             "required": ["file", "start", "end", "replacement"],

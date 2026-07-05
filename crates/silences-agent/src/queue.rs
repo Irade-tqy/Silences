@@ -16,6 +16,8 @@ pub struct TaskQueue {
     order: Mutex<Vec<String>>,
     /// 已完成任务（按完成顺序）
     completed: Mutex<Vec<TaskItem>>,
+    /// 当前活跃任务（start_task 设置，end_task 清除）
+    active: Mutex<Option<TaskItem>>,
 }
 
 impl TaskQueue {
@@ -24,6 +26,7 @@ impl TaskQueue {
             tasks: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             completed: Mutex::new(Vec::new()),
+            active: Mutex::new(None),
         }
     }
 
@@ -66,10 +69,29 @@ impl TaskQueue {
         order.iter().filter_map(|id| tasks.get(id).cloned()).collect()
     }
 
-    /// 标记任务已完成：从待处理移到已完成列表末尾
+    /// 设置当前活跃任务（由 start_task 调用）
+    pub fn set_active(&self, id: &str, description: &str) {
+        *self.active.lock().unwrap() = Some(TaskItem {
+            id: id.to_string(),
+            description: description.to_string(),
+        });
+    }
+
+    /// 清除当前活跃任务（由 end_task 调用）
+    pub fn clear_active(&self) {
+        *self.active.lock().unwrap() = None;
+    }
+
+    /// 是否有活跃任务（add + start 后还没 end）
+    pub fn has_active(&self) -> bool {
+        self.active.lock().unwrap().is_some()
+    }
+
+    /// 标记任务已完成：从待处理移到已完成列表末尾，清除活跃状态
     pub fn complete_task(&self, id: &str) {
         let item = self.remove(id);
         if let Some(item) = item {
+            *self.active.lock().unwrap() = None;
             let mut completed = self.completed.lock().unwrap();
             completed.push(item);
         }

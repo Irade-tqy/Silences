@@ -16,7 +16,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "glance",
         description:
-            "获取指定目录的一级子项概览或单个文件的信息。返回名称、文本文件行数和开头连续注释行的内容。\nwhy: 用于探索项目结构，了解代码库布局。[不可撤销]",
+            "获取目录一级子项概览或单个文件信息。\nwhy: 探索项目结构[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {

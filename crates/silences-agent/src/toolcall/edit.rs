@@ -25,7 +25,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "edit",
         description:
-            "将文件中匹配的第一个结果替换为指定字符串。\nwhy: 对单个位置进行精准修改时使用。\nhow: regex=true 全文正则匹配（默认）；regex=false 纯文本字面量匹配；raw=true 保持原始格式（不标准化）。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格。需要保持原始格式请设置 raw=true。\n匹配失败时显示最近似的位置。[可撤销]",
+            "修改文件，匹配失败时显示最近似内容。\nwhy: 对单个位置修改[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -35,23 +35,23 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "regex=true 为正则表达式；regex=false 为纯文本字面量"
+                    "description": "原式内容/正则"
                 },
                 "replacement": {
                     "type": "string",
-                    "description": "要替换为的字符串"
+                    "description": "替换内容"
                 },
                 "line": {
                     "type": "integer",
-                    "description": "目标行号。不指定 line 且匹配唯一时自动选择；不指定 line 且匹配不唯一时报错。"
+                    "description": "取 (start+end)/2 最接近该行的匹配"
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "true=正则模式, false=纯文本字面量模式（默认）"
+                    "description": "true=启用正则（默认 false）"
                 },
                 "raw": {
                     "type": "boolean",
-                    "description": "true=不执行 CRLF/Tab 标准化，保持原始格式（默认 false）"
+                    "description": "true=不执行 CRLF/Tab 标准化（默认 false）"
                 }
             },
             "required": ["file", "pattern", "replacement"],

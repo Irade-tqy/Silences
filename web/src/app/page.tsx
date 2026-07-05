@@ -207,18 +207,6 @@ export default function Page() {
     const text = input.trim();
     if (!text || loading) return;
 
-    // 没有活跃会话 → 创建新会话
-    if (!activeId) {
-      try {
-        const res = await fetch(`${apiBase}/sessions`, { method: 'POST' });
-        if (res.ok) {
-          const newSess: Session = await res.json();
-          setActiveId(newSess.id);
-          await loadSessions();
-        }
-      } catch { return; }
-    }
-
     setInput('');
     setLoading(true);
     setPaused(false);
@@ -239,11 +227,10 @@ export default function Page() {
     abortRef.current = ctrl;
 
     try {
-      const params = new URLSearchParams({ session_id: activeId || '' });
-      const res = await fetch(`${apiBase}/chat?${params}`, {
+      const res = await fetch(`${apiBase}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text }),
+        body: JSON.stringify({ message: text, session_id: activeId || null }),
         signal: ctrl.signal,
       });
 
@@ -283,7 +270,10 @@ export default function Page() {
           try {
             const parsed = JSON.parse(data);
 
-            if (parsed.type === 'text') {
+            if (parsed.type === 'session') {
+              setActiveId(parsed.id);
+              loadSessions();
+            } else if (parsed.type === 'text') {
               setMessages(prev => {
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
@@ -301,63 +291,100 @@ export default function Page() {
                 }
                 return copy;
               });
-            } else if (parsed.type === 'tool_call_start') {
+            } else if (parsed.type === 'tool_call') {
+              if (parsed.result === null) {
+                // Tool call start
+                setMessages(prev => {
+                  const copy = [...prev];
+                  const last = copy[copy.length - 1];
+                  if (last?.isStreaming) {
+                    if (!last.toolCalls) last.toolCalls = [];
+                    last.toolCalls.push({
+                      id: parsed.id,
+                      name: parsed.name,
+                      args: parsed.args,
+                    });
+                  }
+                  return copy;
+                });
+              } else {
+                // Tool call end（更新结果）
+                setMessages(prev => {
+                  const copy = [...prev];
+                  const last = copy[copy.length - 1];
+                  if (last?.toolCalls) {
+                    const tc = last.toolCalls.find(t => t.id === parsed.id);
+                    if (tc) tc.result = parsed.result;
+                  }
+                  return copy;
+                });
+              }
+            } else if (parsed.type === 'usage') {
+              setRoundUsage({
+                input_tokens: parsed.input_tokens,
+                output_tokens: parsed.output_tokens,
+                cache_hit_tokens: parsed.cache_hit_tokens,
+                cache_miss_tokens: parsed.cache_miss_tokens,
+                cost_yuan: parsed.cost_yuan,
+              });
+            } else if (parsed.type === 'paused') {
+              setPaused(true);
+            } else if (parsed.type === 'resumed') {
+              setPaused(false);
+            } else if (parsed.type === 'error') {
               setMessages(prev => {
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
                 if (last?.isStreaming) {
-                  if (!last.toolCalls) last.toolCalls = [];
-                  last.toolCalls.push({
-                    id: parsed.tool_call_id,
-                    name: parsed.tool_name,
-                    args: parsed.tool_args,
-                    result: undefined,
-                  });
+                  last.content = parsed.message;
+                  last.isStreaming = false;
                 }
                 return copy;
               });
-            } else if (parsed.type === 'tool_call_end') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.toolCalls) {
-                  const tc = last.toolCalls.find(t => t.id === parsed.tool_call_id);
-                  if (tc) tc.result = parsed.result;
-                }
-                return copy;
-              });
-            } else if (parsed.type === 'done') {
+            } else if (parsed.type === 'message_boundary') {
               setMessages(prev => {
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
                 if (last?.isStreaming) last.isStreaming = false;
-                return copy;
+                return [...copy, { role: 'assistant', content: '', isStreaming: true, reasoning: '' }];
               });
-              if (parsed.usage) setTotalUsage(parsed.usage);
-              if (parsed.round_usage) setRoundUsage(parsed.round_usage);
-              loadSessions();
+            } else if (parsed.type === 'context_rollback') {
+              setMessages(prev => {
+                const copy = [...prev];
+                const last = copy[copy.length - 1];
+                if (last?.isStreaming) copy.pop();
+                return [...copy, { role: 'assistant', content: '', isStreaming: true, reasoning: '' }];
+              });
             }
           } catch { /* ignore parse errors */ }
         }
       }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        if (paused) {
-          setMessages(prev => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last?.isStreaming) last.isStreaming = false;
-            return copy;
-          });
-        }
+      if (err instanceof Error && err.name !== 'AbortError') {
+        console.error('SSE stream error:', err);
       }
     } finally {
+      setMessages(prev => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        if (last?.isStreaming) last.isStreaming = false;
+        return copy;
+      });
       setLoading(false);
       setPaused(false);
+      loadSessions();
     }
-  }, [input, loading, activeId, apiBase, loadSessions, paused]);
+  }, [input, loading, activeId, apiBase, loadSessions]);
 
-  const stopGeneration = useCallback(() => {
+  const stopGeneration = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      await fetch(`${apiBase}/sessions/${activeId}/set_state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      });
+    } catch { /* ignore */ }
     abortRef.current?.abort();
     setPaused(false);
     setMessages(prev => {
@@ -371,125 +398,33 @@ export default function Page() {
       }
       return copy;
     });
-  }, []);
+  }, [activeId, apiBase]);
 
-  const pauseGeneration = useCallback(() => {
-    abortRef.current?.abort();
+  const pauseGeneration = useCallback(async () => {
+    if (!activeId) return;
+    // 立即更新 UI（不用等后端响应）
     setPaused(true);
-    setMessages(prev => {
-      const copy = [...prev];
-      const last = copy[copy.length - 1];
-      if (last?.isStreaming) last.isStreaming = false;
-      return copy;
-    });
-  }, []);
+    // 通知后端暂停（不 abort fetch，SSE 连接保持存活）
+    try {
+      await fetch(`${apiBase}/sessions/${activeId}/set_state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'pause' }),
+      });
+    } catch { /* ignore network errors */ }
+  }, [activeId, apiBase]);
 
   const resumeGeneration = useCallback(async () => {
     if (!activeId) return;
-    setPaused(false);
-    setLoading(true);
-
-    const assistantMsg: Message = {
-      role: 'assistant',
-      content: '',
-      isStreaming: true,
-      reasoning: '',
-    };
-    setMessages(prev => [...prev, assistantMsg]);
-
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-
+    // 通知后端恢复（不创建新 fetch，现有 SSE 连接会收到 resumed 事件）
     try {
-      const params = new URLSearchParams({ session_id: activeId, resume: 'true' });
-      const res = await fetch(`${apiBase}/chat?${params}`, {
+      await fetch(`${apiBase}/sessions/${activeId}/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-        signal: ctrl.signal,
+        body: JSON.stringify({ action: 'resume' }),
       });
-      if (!res.ok) {
-        setMessages(prev => {
-          const copy = [...prev];
-          const last = copy[copy.length - 1];
-          if (last?.isStreaming) {
-            last.content = `请求失败: ${res.status} ${res.statusText}`;
-            last.isStreaming = false;
-          }
-          return copy;
-        });
-        setLoading(false);
-        return;
-      }
-
-      const reader = res.body?.getReader();
-      if (!reader) return;
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (!data) continue;
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.type === 'text') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.isStreaming) last.content += parsed.content;
-                return copy;
-              });
-            } else if (parsed.type === 'reasoning') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.isStreaming) last.reasoning = (last.reasoning || '') + parsed.content;
-                return copy;
-              });
-            } else if (parsed.type === 'tool_call_start') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.isStreaming) {
-                  if (!last.toolCalls) last.toolCalls = [];
-                  last.toolCalls.push({ id: parsed.tool_call_id, name: parsed.tool_name, args: parsed.tool_args });
-                }
-                return copy;
-              });
-            } else if (parsed.type === 'tool_call_end') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.toolCalls) {
-                  const tc = last.toolCalls.find(t => t.id === parsed.tool_call_id);
-                  if (tc) tc.result = parsed.result;
-                }
-                return copy;
-              });
-            } else if (parsed.type === 'done') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.isStreaming) last.isStreaming = false;
-                return copy;
-              });
-              if (parsed.usage) setTotalUsage(parsed.usage);
-              if (parsed.round_usage) setRoundUsage(parsed.round_usage);
-              loadSessions();
-            }
-          } catch { /* ignore */ }
-        }
-      }
     } catch { /* ignore */ }
-    finally { setLoading(false); setPaused(false); }
-  }, [activeId, apiBase, loadSessions]);
+  }, [activeId, apiBase]);
 
   return (
     <div className={`app-root${isMobile ? ' layout-mobile' : ''}`}>

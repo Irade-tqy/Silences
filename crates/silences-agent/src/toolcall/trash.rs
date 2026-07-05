@@ -12,13 +12,13 @@ pub fn tool() -> ToolDef {
     ToolDef {
         name: "trash",
         description:
-            "将文件移动到项目的 .trash 文件夹。\nwhy: 安全删除文件，保留恢复可能。[可撤销]",
+            "将文件移至 .trash 文件夹。\nwhy: 删除文件同时保留恢复可能[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "要移入回收站的文件或目录的绝对路径"
+                    "description": "文件或目录的绝对路径"
                 }
             },
             "required": ["path"],

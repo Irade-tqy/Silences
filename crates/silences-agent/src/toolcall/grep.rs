@@ -23,7 +23,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "grep",
         description:
-            "在指定路径下搜索文本或正则匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\nregex=false（默认）纯文本搜索；regex=true 正则搜索。[不可撤销]",
+            "在路径下搜索文本或正则匹配\nwhy: 精确定位[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -33,22 +33,22 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "regex=false 时纯文本搜索；regex=true 时为正则表达式"
+                    "description": "要匹配的模式"
                 },
                 "extensions": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "**必填**。要搜索的文件扩展名，不含点号。例如 [\"rs\",\"ts\",\"tsx\"]。只搜这些扩展名的文件。"
+                    "description": "要搜索的文件扩展名，不含点号。如 [\"rs\",\"ts\",\"tsx\"]"
                 },
                 "context_lines": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 20,
-                    "description": "匹配行上下各显示多少行上下文（可选，默认 2）。调大以查看函数签名或闭合括号。"
+                    "description": "每个匹配行上下各显示多少行（默认 2）"
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "true=正则模式, false=纯文本搜索（默认）"
+                    "description": "true=启用正则（默认 false）"
                 }
             },
             "required": ["path", "pattern", "extensions"],

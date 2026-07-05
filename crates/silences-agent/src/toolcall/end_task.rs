@@ -16,7 +16,7 @@ use crate::queue::TaskQueue;
 pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
     ToolDef {
         name: "end_task",
-        description: "完成当前任务并记录摘要。\nwhy: 标记工作完成，系统将自动更新任务列表并提示你更新 CONTEXT.md，然后回退上下文。如果队列中还有任务将继续执行，否则系统会请求最终总结。\nhow: 调用 end_task 后请等待系统指示更新 CONTEXT.md。[不可撤销]",
+        description: "完成当前任务。\nwhy: 标记工作完成[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -26,7 +26,7 @@ pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
                 },
                 "summary": {
                     "type": "string",
-                    "description": "完成摘要，记录关键成果"
+                    "description": "简要描述做了什么，不含具体信息"
                 }
             },
             "required": ["task_id", "summary"],

@@ -50,6 +50,54 @@ struct AccumTc {
     arguments: String,
 }
 
+/// 暂停等待循环：发送 Paused 事件，每 500ms 轮询 resume/stop 标志
+///
+/// 返回 `true` = 暂停期间收到停止信号 → 调用者应 return（agent 已清理）
+/// 返回 `false` = 正常恢复
+async fn pause_until_resumed(
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    flags: &RunFlags,
+    messages: &[Message],
+    session_id: &str,
+    agent_contexts: &tokio::sync::Mutex<HashMap<String, Vec<Message>>>,
+    db: &tokio::sync::Mutex<Db>,
+    active_runs: &tokio::sync::Mutex<HashMap<String, Arc<RunFlags>>>,
+) -> bool {
+    eprintln!("[agent] session={} 暂停中，每 500ms 轮询 pause/stop 标志",
+        &session_id[..8.min(session_id.len())]);
+    let mut was_paused = false;
+    while flags.should_pause() {
+        if !was_paused {
+            let _ = tx.send(AgentEvent::Paused).await;
+            was_paused = true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if flags.should_stop() {
+            // 停止时保存最终快照
+            {
+                let mut map = agent_contexts.lock().await;
+                map.insert(session_id.to_string(), messages.to_vec());
+            }
+            {
+                let db_lock = db.lock().await;
+                let _ = db_lock.save_context_snapshot(session_id, messages);
+            }
+            let _ = tx.send(AgentEvent::Error("已停止".into())).await;
+            {
+                let mut runs = active_runs.lock().await;
+                runs.remove(session_id);
+            }
+            eprintln!("[agent] session={} 暂停中被停止，退出",
+                &session_id[..8.min(session_id.len())]);
+            return true;
+        }
+    }
+    let _ = tx.send(AgentEvent::Resumed).await;
+    eprintln!("[agent] session={} 已恢复运行",
+        &session_id[..8.min(session_id.len())]);
+    false
+}
+
 /// 运行 agent 循环，返回事件流
 ///
 /// agent 自行管理 LLM↔tool 循环，产生流式事件供后端转发 SSE。
@@ -110,38 +158,10 @@ pub fn run_agent(
 
             // 暂停等待循环（每轮开始时检查，等待外部 resume 或 stop）
             if flags.should_pause() {
-                eprintln!("[agent] session={} 暂停中，每 500ms 轮询 pause/stop 标志",
-                    &session_id[..8.min(session_id.len())]);
-                let mut was_paused = false;
-                while flags.should_pause() {
-                    if !was_paused {
-                        let _ = tx.send(AgentEvent::Paused).await;
-                        was_paused = true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    if flags.should_stop() {
-                        // 停止时保存最终快照
-                        {
-                            let mut map = agent_contexts.lock().await;
-                            map.insert(session_id.clone(), messages.clone());
-                        }
-                        {
-                            let db_lock = db.lock().await;
-                            let _ = db_lock.save_context_snapshot(&session_id, &messages);
-                        }
-                        let _ = tx.send(AgentEvent::Error("已停止".into())).await;
-                        {
-                            let mut runs = active_runs.lock().await;
-                            runs.remove(&session_id);
-                        }
-                        eprintln!("[agent] session={} 暂停中被停止，退出",
-                            &session_id[..8.min(session_id.len())]);
-                        return;
-                    }
+                if pause_until_resumed(&tx, &flags, &messages, &session_id,
+                    &agent_contexts, &db, &active_runs).await {
+                    return;
                 }
-                let _ = tx.send(AgentEvent::Resumed).await;
-                eprintln!("[agent] session={} 已恢复运行",
-                    &session_id[..8.min(session_id.len())]);
             }
 
             // 检查外部停止信号
@@ -220,6 +240,15 @@ pub fn run_agent(
             // 获取 usage
             if let Some(u) = stream.take_usage() {
                 usage = Some(u);
+            }
+
+            // LLM 流完成后、处理结果前允许暂停
+            // 如果推理期间收到暂停信号，流正常结束然后暂停，不执行工具
+            if flags.should_pause() {
+                if pause_until_resumed(&tx, &flags, &messages, &session_id,
+                    &agent_contexts, &db, &active_runs).await {
+                    return;
+                }
             }
 
             // 判断：有 tool call 则执行
@@ -320,14 +349,7 @@ pub fn run_agent(
                         }
                         drop(db_lock);
 
-                        // 3. 检查队列状态，决定继续还是请求总结
-                        if queue.is_empty() {
-                            messages.push(Message::new_user("orch", "所有任务已完成。请生成一份全面的最终总结，然后结束。"));
-                            eprintln!("[agent] 队列已空，请求最终总结");
-                        } else {
-                            messages.push(Message::new_user("orch", "继续执行后续任务。"));
-                        }
-
+                        // 3. 队列状态已就绪，回退上下文让模型自然决定下一步
                         let _ = tx.send(AgentEvent::ContextRollback).await;
                     }
                     continue;
