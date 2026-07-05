@@ -1,7 +1,20 @@
 //! 项目上下文管理：读取 SILENCES.md（稳定上下文）和 CONTEXT.md（动态进度）
 //!
-//! 消息结构中的位置：
-//!   [A, u_user, o(1), tsks, u_orch(审批), 摘要(缓存), B_stable, B_delta, u_usr(继续)]
+//! 发送给 LLM API 完整的消息结构：
+//!   ┌─ system(可选) ───────────────────────────────────────────┐
+//!   │  用户设置的 system prompt（DB 持久化，前端不传则 None）   │
+//!   └──────────────────────────────────────────────────────────┘
+//!   ┌─ messages[] ─────────────────────────────────────────────┐
+//!   │  [0]  B_stable    SILENCES.md             @name=path     │
+//!   │  [1]  u_user      用户原始输入                           │
+//!   │  [2..] 历史消息（DB 中 hidden=0 的消息，按 id 排序）     │
+//!   │       ├─ assistant(text / tool_calls)                    │
+//!   │       ├─ tool_results                                    │
+//!   │       ├─ summary(assistant, 无 name)   ← rollback 重放   │
+//!   │       ├─ B_delta   CONTEXT.md          @name=path        │
+//!   │       ├─ tsks      task_list.md        @name=path        │
+//!   │       └─ u_orch    orch(继续执行/最终总结)                │
+//!   └──────────────────────────────────────────────────────────┘
 //!
 //! 每个会话有独立的 SILENCES.md 和 CONTEXT.md，存储在 .silences/sessions/{id}/
 //! SILENCES.md = B_stable，只读，存放项目架构/约定。
