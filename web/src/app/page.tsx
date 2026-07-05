@@ -511,30 +511,33 @@ export default function Page() {
         )}
 
         {/* ─── 内容区 ─── */}
-        <ChatPanel hideTopBar={isMobile}
-          messages={messages}
-          input={input}
-          setInput={setInput}
-          loading={loading}
-          paused={paused}
-          totalUsage={totalUsage}
-          roundUsage={roundUsage}
-          activeId={activeId}
-          sessions={sessions}
-          rightSidebarOpen={rightSidebarOpen}
-          setRightSidebarOpen={setRightSidebarOpen}
-          sendMessage={sendMessage}
-          stopGeneration={stopGeneration}
-          pauseGeneration={pauseGeneration}
-          resumeGeneration={resumeGeneration}
-          collapsedThinking={collapsedThinking}
-          setCollapsedThinking={setCollapsedThinking}
-          collapsedToolCalls={collapsedToolCalls}
-          setCollapsedToolCalls={setCollapsedToolCalls}
-          inputRef={inputRef}
-          msgEndRef={msgEndRef}
-          scrollToBottom={scrollToBottom}
-        />
+        {/* 手机端由 mobile-page-stack 内的 ChatPanel 负责，不重复渲染避免 ref 冲突 */}
+        {!isMobile && (
+          <ChatPanel hideTopBar={false}
+            messages={messages}
+            input={input}
+            setInput={setInput}
+            loading={loading}
+            paused={paused}
+            totalUsage={totalUsage}
+            roundUsage={roundUsage}
+            activeId={activeId}
+            sessions={sessions}
+            rightSidebarOpen={rightSidebarOpen}
+            setRightSidebarOpen={setRightSidebarOpen}
+            sendMessage={sendMessage}
+            stopGeneration={stopGeneration}
+            pauseGeneration={pauseGeneration}
+            resumeGeneration={resumeGeneration}
+            collapsedThinking={collapsedThinking}
+            setCollapsedThinking={setCollapsedThinking}
+            collapsedToolCalls={collapsedToolCalls}
+            setCollapsedToolCalls={setCollapsedToolCalls}
+            inputRef={inputRef}
+            msgEndRef={msgEndRef}
+            scrollToBottom={scrollToBottom}
+          />
+        )}
 
         {/* ─── 右侧边栏 ─── */}
         <RightSidebar
