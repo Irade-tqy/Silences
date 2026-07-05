@@ -22,11 +22,11 @@ if ($connections) {
         ($_ -split '\s+')[-1]
     } | Select-Object -Unique
 
-    foreach ($pid in $pids) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    foreach ($procId in $pids) {
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
         if ($proc -and $proc.ProcessName -ne 'System' -and $proc.ProcessName -ne 'Idle') {
-            Write-Host "[restart] 杀掉旧进程: $pid ($($proc.ProcessName))"
-            Stop-Process -Id $pid -Force
+            Write-Host "[restart] 杀掉旧进程: $procId ($($proc.ProcessName))"
+            Stop-Process -Id $procId -Force
         }
     }
 }
