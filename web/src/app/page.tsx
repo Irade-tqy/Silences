@@ -47,7 +47,11 @@ export default function Page() {
   }, []);
 
   const scrollToBottom = useCallback(() => {
-    msgEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!msgEndRef.current) return;
+    // rAF 确保布局已计算（mobile page 切换时尤其需要）
+    requestAnimationFrame(() => {
+      msgEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
   }, []);
 
   const loadSessions = useCallback(async () => {
