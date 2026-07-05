@@ -1,8 +1,11 @@
-//! replace — 在目录下所有文件中搜索并替换所有匹配
-//! regex=true（默认）：全文正则匹配
-//! regex=false：纯文本字面量匹配
+//! replace — 在目录下所有文件中搜索并替换所有匹配（扩展名白名单保护）
+//!
+//! AI 必须指定 extensions 参数声明要搜索的文件扩展名，replace 不会猜测。
+//! regex=true：全文正则匹配；regex=false：纯文本字面量匹配。
+//! 安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。
 //! 自动标准化换行符和缩进。
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +24,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "replace",
         description:
-            "在指定路径下所有文本文件中搜索并替换所有匹配。\nwhy: 需要批量重命名或重构时使用。\nhow: regex=true 全文正则匹配（默认）；regex=false 纯文本字面量匹配。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格。\n匹配失败时显示最近似的位置。[可撤销]",
+            "在路径下所有文件中搜索并替换全部匹配。跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 批量重命名或重构[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -31,18 +34,23 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "regex=true 为正则表达式；regex=false 为纯文本字面量"
+                    "description": "要替换的模式"
                 },
                 "replacement": {
                     "type": "string",
-                    "description": "要替换为的字符串"
+                    "description": "替换内容"
+                },
+                "extensions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "要搜索的文件扩展名，不含点号。如 [\"rs\",\"ts\",\"tsx\"]"
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "true=正则模式, false=纯文本字面量模式（默认）"
+                    "description": "true=启用正则（默认 false）"
                 }
             },
-            "required": ["path", "pattern", "replacement"],
+            "required": ["path", "pattern", "replacement", "extensions"],
             "additionalProperties": false
         }),
         handler: Box::new(move |args| {
@@ -57,13 +65,22 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let replacement = args["replacement"].as_str().context("缺少 replacement 参数")?;
     let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+    let extensions: HashSet<String> = args["extensions"]
+        .as_array()
+        .context("extensions 必须是数组")?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+        .collect();
+    if extensions.is_empty() {
+        anyhow::bail!("extensions 不能为空，请指定要搜索的文件扩展名，如 [\"rs\",\"ts\"]");
+    }
 
     let meta = fs::metadata(path).context("路径不存在")?;
 
     let mut changed_files: Vec<(String, String)> = Vec::new();
 
     if meta.is_dir() {
-        replace_in_dir(path, raw_pattern, replacement, use_regex, &mut changed_files)?;
+        replace_in_dir(path, raw_pattern, replacement, use_regex, &extensions, &mut changed_files)?;
     } else if use_regex {
         // 单文件：正则
         replace_in_file_regex(path, raw_pattern, replacement, &mut changed_files)?;
@@ -84,8 +101,9 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
             )
         } else {
             format!(
-                "replace: 在 {} 中无匹配。{}",
+                "replace: 在 {} 中无匹配 (仅扩展名: {:?})。{}",
                 path,
+                extensions,
                 if use_regex {
                     "当前为正则模式，如需纯文本匹配请设置 regex=false。"
                 } else {
@@ -180,17 +198,31 @@ fn replace_in_dir(
     pattern: &str,
     replacement: &str,
     use_regex: bool,
+    exts: &HashSet<String>,
     changed: &mut Vec<(String, String)>,
 ) -> Result<()> {
     for entry in fs::read_dir(dir).context("读取目录失败")? {
         let entry = entry?;
         let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with('.') && name != "node_modules" && name != "target" {
-                replace_in_dir(&path.to_string_lossy(), pattern, replacement, use_regex, changed)?;
+            // 安全兜底：跳过隐藏目录、node_modules、target、tokenizer
+            if !name.starts_with('.') && name != "node_modules" && name != "target" && name != "tokenizer" {
+                replace_in_dir(&path.to_string_lossy(), pattern, replacement, use_regex, exts, changed)?;
             }
-        } else if is_text_file(&path) {
+        } else {
+            // 安全兜底：跳过调试日志文件，避免自引用循环
+            if name == "api_debug.json" {
+                continue;
+            }
+            // 白名单检查：只替换指定扩展名
+            let ext_ok = path.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| exts.contains(&e.to_lowercase()))
+                .unwrap_or(false);
+            if !ext_ok {
+                continue;
+            }
             let ps = path.to_string_lossy().to_string();
             if use_regex {
                 replace_in_file_regex(&ps, pattern, replacement, changed)?;
@@ -339,37 +371,3 @@ fn levenshtein_ratio(a: &str, b: &str) -> f64 {
     if max_len == 0 { 0.0 } else { prev[m] as f64 / max_len as f64 }
 }
 
-fn is_text_file(path: &std::path::Path) -> bool {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => matches!(
-            ext,
-            "rs"
-                | "py"
-                | "js"
-                | "ts"
-                | "jsx"
-                | "tsx"
-                | "go"
-                | "java"
-                | "c"
-                | "h"
-                | "cpp"
-                | "hpp"
-                | "css"
-                | "html"
-                | "json"
-                | "toml"
-                | "yaml"
-                | "yml"
-                | "md"
-                | "txt"
-                | "sh"
-                | "bat"
-                | "ps1"
-                | "sql"
-                | "xml"
-                | "lock"
-        ),
-        None => false,
-    }
-}
