@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use silences_core::ToolLimits;
 
-use super::{normalize, read_file_robust, ToolDef, ToolOutcome};
+use super::{normalize, read_file_robust, truncate_head_tok, ToolDef, ToolOutcome};
 
 static GREP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -23,7 +23,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "grep",
         description:
-            "在指定路径下搜索文本或正则匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\nhint: regex=false（默认）纯文本搜索；regex=true 正则搜索。[不可撤销]",
+            "在指定路径下搜索文本或正则匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\nregex=false（默认）纯文本搜索；regex=true 正则搜索。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -98,8 +98,16 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     }
 
     if results.is_empty() {
+        let summary = if !meta.is_dir() && !use_regex {
+            // 单文件 + 纯文本模式：模糊匹配找最近似行
+            let content = read_file_robust(path).unwrap_or_default();
+            let content = normalize(&content);
+            grep_failure_feedback(&content, raw_pattern, limits.edit_context_lines, &console_dir)
+        } else {
+            format!("grep: 无匹配 \"{}\" (仅扩展名: {:?})", raw_pattern, extensions)
+        };
         return Ok(ToolOutcome {
-            summary: format!("grep: 无匹配 \"{}\" (仅扩展名: {:?})", raw_pattern, extensions),
+            summary,
             inverse: None,
             rollback: false,
             approval_pending: None,
@@ -232,4 +240,104 @@ fn search_file(path: &str, re: &Regex, results: &mut Vec<(String, usize)>, conte
         results.push((format!("[{}]\n{}", path, file_parts.join("\n---\n")), count));
     }
     Ok(())
+}
+
+/// grep 单文件匹配失败时模糊反馈
+fn grep_failure_feedback(
+    content: &str,
+    pattern: &str,
+    context_lines: usize,
+    console_dir: &Option<PathBuf>,
+) -> String {
+    let total_lines = content.lines().count();
+    let mut body = String::from("grep: 无匹配。");
+    let candidates = fuzzy_find_best(content, pattern, 3);
+
+    if !candidates.is_empty() {
+        body.push_str(&format!("\n最接近的候选行：\n"));
+        for (idx, (line_num, _, dist)) in candidates.iter().enumerate() {
+            body.push_str(&format!(
+                "  {}. 第 {} 行（相似度 {:.0}%）\n",
+                idx + 1,
+                line_num + 1,
+                (1.0 - dist) * 100.0,
+            ));
+            let start = 1.max(line_num.saturating_sub(context_lines / 2));
+            let end = total_lines.min(line_num + context_lines / 2);
+            let ctx: Vec<String> = content.lines()
+                .skip(start - 1)
+                .take(end - start + 1)
+                .enumerate()
+                .map(|(i, l)| {
+                    let lineno = start + i;
+                    let arrow = if lineno == line_num + 1 { "→" } else { " " };
+                    format!("{} {:>6}\t{}", arrow, lineno, l)
+                })
+                .collect();
+            body.push_str(&format!("{}\n", ctx.join("\n")));
+        }
+    }
+
+    // 截断入文件
+    const FEEDBACK_TRUNCATE_TOK: usize = 600;
+    let (body_cropped, was_truncated) = truncate_head_tok(&body, FEEDBACK_TRUNCATE_TOK);
+    if was_truncated {
+        if let Some(cd) = console_dir {
+            let _ = fs::create_dir_all(cd);
+            let seq = GREP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let out_path = cd.join(format!("grep_fail_{seq}.out"));
+            let _ = fs::write(&out_path, &body);
+            body = format!("{}\n[完整反馈已保存至 {}]", body_cropped, out_path.display());
+        }
+    }
+
+    body
+}
+
+/// 模糊匹配：对每一行计算 Levenshtein 距离，返回最接近的 N 行
+fn fuzzy_find_best<'c>(
+    content: &'c str,
+    pattern: &str,
+    top_n: usize,
+) -> Vec<(usize, String, f64)> {
+    let mut scored: Vec<(usize, String, f64)> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            let dist = levenshtein_ratio(l, pattern);
+            (i, l.to_string(), dist)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    scored.truncate(top_n);
+    scored
+}
+
+/// 两字符串间的 Levenshtein 距离归一化 [0,1]，0=完全相同
+fn levenshtein_ratio(a: &str, b: &str) -> f64 {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let n = a_chars.len();
+    let m = b_chars.len();
+    if n == 0 { return if m == 0 { 0.0 } else { 1.0 }; }
+    if m == 0 { return 1.0; }
+
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0; m + 1];
+
+    for i in 0..n {
+        curr[0] = i + 1;
+        for j in 0..m {
+            let cost = if a_chars[i] == b_chars[j] { 0 } else { 1 };
+            curr[j + 1] = (prev[j] + cost)
+                .min(curr[j] + 1)
+                .min(prev[j + 1] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    let max_len = n.max(m);
+    if max_len == 0 { 0.0 } else { prev[m] as f64 / max_len as f64 }
 }
