@@ -1556,7 +1556,12 @@ html, body {
   display: none !important;
 }
 
-.layout-mobile .sidebar-left {
+/* 只隐藏 main-row 的直接子级 sidebar，不隐藏 mobile-page-stack 内的 */
+.layout-mobile > .main-row > .sidebar-left {
+  display: none;
+}
+
+.layout-mobile > .main-row > .sidebar-right {
   display: none;
 }
 
@@ -1569,8 +1574,24 @@ html, body {
   width: 100%;
 }
 
-.layout-mobile .sidebar-right {
+/* mobile page stack 内部的 sidebar 铺满全屏 */
+.mobile-page .sidebar {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border-right: none;
+}
+
+/* mobile page 里已经有 mobile-nav，隐藏 sidebar 自带的标题 */
+.mobile-page .sidebar .sidebar-header {
   display: none;
+}
+
+.mobile-page .sidebar-right {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border-left: none;
 }
 
 /* ── Responsive ── */
