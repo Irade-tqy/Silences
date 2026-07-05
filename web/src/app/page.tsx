@@ -48,7 +48,13 @@ export default function Page() {
 
   const scrollToBottom = useCallback(() => {
     const el = msgEndRef.current?.closest<HTMLElement>('.messages-scroll');
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) {
+      console.log(`[scroll] container found scrollTop=${el.scrollTop} scrollHeight=${el.scrollHeight} clientHeight=${el.clientHeight}`);
+      el.scrollTop = el.scrollHeight;
+      console.log(`[scroll] after set scrollTop=${el.scrollHeight}`);
+    } else {
+      console.warn('[scroll] container .messages-scroll not found');
+    }
   }, []);
 
   const loadSessions = useCallback(async () => {
@@ -174,6 +180,7 @@ export default function Page() {
   }, [apiBase, loadSettings]);
 
   const selectSession = useCallback(async (id: string) => {
+    console.log(`[scroll] selectSession start id=${id} isMobile=${isMobile} mobilePage=${mobilePage}`);
     setActiveId(id);
     setMessages([]);
     setTotalUsage(null);
@@ -196,6 +203,7 @@ export default function Page() {
           })),
         }));
         setMessages(converted);
+        console.log(`[scroll] messages set count=${converted.length} converting to chat=${isMobile}`);
         if (isMobile) setMobilePage('chat');
       }
       const usageRes = await fetch(`${apiBase}/sessions/${id}/usage`);
