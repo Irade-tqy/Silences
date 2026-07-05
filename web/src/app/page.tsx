@@ -47,7 +47,8 @@ export default function Page() {
   }, []);
 
   const scrollToBottom = useCallback(() => {
-    msgEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = msgEndRef.current?.closest<HTMLElement>('.messages-scroll');
+    if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
   const loadSessions = useCallback(async () => {
