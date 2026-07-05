@@ -1,4 +1,6 @@
-//! read — 读取文件内容（自动标准化换行和缩进）
+//! read — 读取文件内容
+//! raw=false（默认）：自动标准化换行和缩进
+//! raw=true：保持原始格式
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,7 +19,7 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
     ToolDef {
         name: "read",
         description:
-            "读取文件内容。\nwhy: 需要查看代码或文件的内容时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格展示。[不可撤销]",
+            "读取文件内容。\nwhy: 需要查看代码或文件的内容时使用。\nhow: 默认大文件自动截断为开头+结尾（~1500+500 tok）；设置 all=true 读取全文；raw=true 显示原始格式（不标准化）。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格展示。需要原始格式请设置 raw=true。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -36,6 +38,10 @@ pub fn tool(read_tracker: ReadTracker) -> ToolDef {
                 "end_line": {
                     "type": "integer",
                     "description": "结束行号（1-based，可选，默认末尾）"
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "true=显示原始格式，不执行 CRLF/Tab 标准化（默认 false）"
                 }
             },
             "required": ["path"],
@@ -56,9 +62,20 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
     }
 
     let original = read_file_robust(path)?;
-    let is_mk = is_tabsensitive(path);
-    let content = if is_mk { original } else { normalize(&original) };
-    let warning = if is_mk { format!("\n{}", TABSENSITIVE_WARNING) } else { String::new() };
+    let use_raw = args.get("raw").and_then(Value::as_bool).unwrap_or(false);
+    let (content, is_raw_mode) = if use_raw {
+        (original, true)
+    } else if is_tabsensitive(path) {
+        (original, false)
+    } else {
+        (normalize(&original), false)
+    };
+    let prefix = if is_raw_mode { "[RAW FILE]" } else { "[FILE]" };
+    let warning = if !use_raw && is_tabsensitive(path) {
+        format!("\n{}", TABSENSITIVE_WARNING)
+    } else {
+        String::new()
+    };
 
     if content.is_empty() {
         return Ok(ToolOutcome {
@@ -100,7 +117,8 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
         .collect();
 
     let summary = format!(
-        "[FILE] {} (共 {} 行, 显示 {}–{})\n{}{}",
+        "{} {} (共 {} 行, 显示 {}–{})\n{}{}",
+        prefix,
         path,
         total,
         start,

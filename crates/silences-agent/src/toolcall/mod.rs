@@ -5,9 +5,8 @@
 pub mod glance;
 pub mod grep;
 pub mod read;
-pub mod raw_read;
 pub mod edit;
-pub mod raw_edit;
+pub mod block_edit;
 pub mod write;
 pub mod replace;
 pub mod find;
@@ -33,7 +32,7 @@ use tokio::sync::Mutex;
 
 use self::regret::ToolHistory;
 
-/// 写前检查保护：记录已被 read / raw_read 读取过的文件路径。
+/// 写前检查保护：记录已被 read 读取过的文件路径。
 /// write 工具覆写文件前必须在此注册表中。
 pub type ReadTracker = Arc<Mutex<HashSet<String>>>;
 
@@ -367,10 +366,9 @@ pub fn all_tools(
         glance::tool(console_dir.clone(), limits),
         grep::tool(console_dir.clone(), limits),
         read::tool(read_tracker.clone()),
-        raw_read::tool(read_tracker.clone()),
         write::tool(),
         edit::tool(console_dir.clone(), limits),
-        raw_edit::tool(console_dir.clone(), limits),
+        block_edit::tool(console_dir.clone(), limits),
         replace::tool(console_dir.clone(), limits),
         find::tool(console_dir.clone(), limits),
         regret::tool(history),

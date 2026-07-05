@@ -1,7 +1,8 @@
 //! edit — 替换文件中第一个匹配
 //! regex=true（默认）：全文正则匹配（支持 PCRE 锚点）
 //! regex=false：纯文本字面量匹配
-//! 自动标准化换行符和缩进。
+//! raw=false（默认）：自动标准化换行符和缩进
+//! raw=true：保持原始格式
 
 use std::fs;
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "edit",
         description:
-            "将文件中匹配的第一个结果替换为指定字符串。\nwhy: 对单个位置进行精准修改时使用。\nhow: regex=true 全文正则匹配（默认）；regex=false 纯文本字面量匹配。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格。需要保持原始格式请用 raw_edit。\n匹配失败时显示最近似的位置。[可撤销]",
+            "将文件中匹配的第一个结果替换为指定字符串。\nwhy: 对单个位置进行精准修改时使用。\nhow: regex=true 全文正则匹配（默认）；regex=false 纯文本字面量匹配；raw=true 保持原始格式（不标准化）。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格。需要保持原始格式请设置 raw=true。\n匹配失败时显示最近似的位置。[可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -47,6 +48,10 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 "regex": {
                     "type": "boolean",
                     "description": "true=正则模式, false=纯文本字面量模式（默认）"
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "true=不执行 CRLF/Tab 标准化，保持原始格式（默认 false）"
                 }
             },
             "required": ["file", "pattern", "replacement"],
@@ -68,9 +73,14 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
 
     let original = read_file_robust(file)?;
 
-    let is_mk = is_tabsensitive(file);
-    let content = if is_mk { original.clone() } else { normalize(&original) };
-    let warning = if is_mk { format!("\n{}", TABSENSITIVE_WARNING) } else { String::new() };
+    let use_raw = args.get("raw").and_then(Value::as_bool).unwrap_or(false);
+    let (content, warning) = if use_raw {
+        (original.clone(), String::new())
+    } else if is_tabsensitive(file) {
+        (original.clone(), format!("\n{}", TABSENSITIVE_WARNING))
+    } else {
+        (normalize(&original), String::new())
+    };
 
     // ── 匹配阶段 ──
     let matches_positions = if use_regex {

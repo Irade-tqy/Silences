@@ -236,7 +236,7 @@ pub struct ToolLimits {
     pub glance_max_shown_items: usize,
     /// find 最多显示多少匹配（超出后截断，完整内容存 console 文件）
     pub find_max_shown_items: usize,
-    /// edit/raw_edit/replace 匹配失败时显示行号上下文的行数
+    /// edit/block_edit/replace 匹配失败时显示行号上下文的行数
     pub edit_context_lines: usize,
 }
 
