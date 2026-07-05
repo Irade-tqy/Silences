@@ -28,6 +28,7 @@ interface ChatPanelProps {
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   msgEndRef: React.RefObject<HTMLDivElement | null>;
   scrollToBottom: () => void;
+  hideTopBar?: boolean;
 }
 
 export default function ChatPanel({
@@ -37,7 +38,7 @@ export default function ChatPanel({
   sendMessage, stopGeneration, pauseGeneration, resumeGeneration,
   collapsedThinking, setCollapsedThinking,
   collapsedToolCalls, setCollapsedToolCalls,
-  inputRef, msgEndRef, scrollToBottom,
+  inputRef, msgEndRef, scrollToBottom, hideTopBar,
 }: ChatPanelProps) {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
@@ -54,26 +55,27 @@ export default function ChatPanel({
 
   return (
     <div className="chat-panel">
-      {/* Top bar */}
-      <div style={{
-        height: 60, display: 'flex', alignItems: 'center',
-        padding: '0 24px', gap: 8, flexShrink: 0,
-      }}>
-        <span style={{ fontSize: 14, color: 'var(--ds-label-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {activeId
-            ? (sessions.find(s => s.id === activeId)?.preview?.slice(0, 40) || '会话')
-            : '新会话'
-          }
-        </span>
-        <button className="sidebar-toggle-right" onClick={() => setRightSidebarOpen(v => !v)} title="上下文面板">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="7" height="7" rx="1"/>
-            <rect x="14" y="3" width="7" height="7" rx="1"/>
-            <rect x="3" y="14" width="7" height="7" rx="1"/>
-            <rect x="14" y="14" width="7" height="7" rx="1"/>
-          </svg>
-        </button>
-      </div>
+      {!hideTopBar && (
+        <div style={{
+          height: 60, display: 'flex', alignItems: 'center',
+          padding: '0 24px', gap: 8, flexShrink: 0,
+        }}>
+          <span style={{ fontSize: 14, color: 'var(--ds-label-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {activeId
+              ? (sessions.find(s => s.id === activeId)?.preview?.slice(0, 40) || '会话')
+              : '新会话'
+            }
+          </span>
+          <button className="sidebar-toggle-right" onClick={() => setRightSidebarOpen(v => !v)} title="上下文面板">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="7" height="7" rx="1"/>
+              <rect x="14" y="3" width="7" height="7" rx="1"/>
+              <rect x="3" y="14" width="7" height="7" rx="1"/>
+              <rect x="14" y="14" width="7" height="7" rx="1"/>
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Messages area */}
       <div className="messages-scroll">

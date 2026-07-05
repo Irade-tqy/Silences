@@ -7,6 +7,7 @@ import ChatPanel from '@/components/ChatPanel';
 import RightSidebar from '@/components/RightSidebar';
 import SettingsModal from '@/components/SettingsModal';
 import { ContextMenu, RenameModal, DeleteConfirmModal } from '@/components/Modals';
+import { useViewport } from '@/hooks/useViewport';
 
 export default function Page() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -36,6 +37,8 @@ export default function Page() {
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const { isMobile } = useViewport();
+  const [mobilePage, setMobilePage] = useState<'sessions' | 'chat' | 'right'>('sessions');
 
   const apiBase = useMemo(() => {
     const host = process.env.NEXT_PUBLIC_API_HOST ||
@@ -195,7 +198,8 @@ export default function Page() {
       const usageRes = await fetch(`${apiBase}/sessions/${id}/usage`);
       if (usageRes.ok) setTotalUsage(await usageRes.json());
     } catch { /* ignore */ }
-  }, [apiBase]);
+    if (isMobile) setMobilePage('chat');
+  }, [apiBase, isMobile]);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
@@ -486,7 +490,7 @@ export default function Page() {
   }, [activeId, apiBase, loadSessions]);
 
   return (
-    <div className="app-root">
+    <div className={`app-root${isMobile ? ' layout-mobile' : ''}`}>
       <div className="main-row">
 
         {/* ─── 左侧侧栏 ─── */}
@@ -502,7 +506,7 @@ export default function Page() {
         )}
 
         {/* ─── 内容区 ─── */}
-        <ChatPanel
+        <ChatPanel hideTopBar={isMobile}
           messages={messages}
           input={input}
           setInput={setInput}
@@ -535,6 +539,94 @@ export default function Page() {
           collapsedCtxCards={collapsedCtxCards}
           setCollapsedCtxCards={setCollapsedCtxCards}
         />
+
+        {/* ─── 手机端页面栈 ─── */}
+        {isMobile && (
+          <div className="mobile-page-stack">
+            {/* 会话列表页 */}
+            <div className={`mobile-page ${mobilePage === 'sessions' ? 'active' : ''}`}>
+              <div className="mobile-nav">
+                <div className="mobile-nav-title">Silences</div>
+              </div>
+              <Sidebar
+                sessions={sessions}
+                activeId={activeId}
+                selectSession={selectSession}
+                newSession={newSession}
+                setSettingsOpen={setSettingsOpen}
+                onContextMenu={handleContextMenu}
+              />
+            </div>
+
+            {/* 聊天页 */}
+            <div className={`mobile-page ${mobilePage === 'chat' ? 'active' : ''}`}>
+              <div className="mobile-nav">
+                <button className="mobile-nav-back" onClick={() => setMobilePage('sessions')}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="15 18 9 12 15 6"/>
+                  </svg>
+                </button>
+                <div className="mobile-nav-title">
+                  {activeId
+                    ? (sessions.find(s => s.id === activeId)?.preview?.slice(0, 24) || '会话')
+                    : '新会话'}
+                </div>
+                <button className="mobile-nav-back" onClick={() => { setRightSidebarOpen(true); setMobilePage('right'); }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="7" height="7" rx="1"/>
+                    <rect x="14" y="3" width="7" height="7" rx="1"/>
+                    <rect x="3" y="14" width="7" height="7" rx="1"/>
+                    <rect x="14" y="14" width="7" height="7" rx="1"/>
+                  </svg>
+                </button>
+              </div>
+              <ChatPanel
+                messages={messages}
+                input={input}
+                setInput={setInput}
+                loading={loading}
+                paused={paused}
+                totalUsage={totalUsage}
+                roundUsage={roundUsage}
+                activeId={activeId}
+                sessions={sessions}
+                rightSidebarOpen={rightSidebarOpen}
+                setRightSidebarOpen={setRightSidebarOpen}
+                sendMessage={sendMessage}
+                stopGeneration={stopGeneration}
+                pauseGeneration={pauseGeneration}
+                resumeGeneration={resumeGeneration}
+                collapsedThinking={collapsedThinking}
+                setCollapsedThinking={setCollapsedThinking}
+                collapsedToolCalls={collapsedToolCalls}
+                setCollapsedToolCalls={setCollapsedToolCalls}
+                inputRef={inputRef}
+                msgEndRef={msgEndRef}
+                scrollToBottom={scrollToBottom}
+                hideTopBar
+              />
+            </div>
+
+            {/* 运行时面板页 */}
+            <div className={`mobile-page ${mobilePage === 'right' ? 'active' : ''}`}>
+              <div className="mobile-nav">
+                <button className="mobile-nav-back" onClick={() => setMobilePage('chat')}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="15 18 9 12 15 6"/>
+                  </svg>
+                </button>
+                <div className="mobile-nav-title">运行时视图</div>
+              </div>
+              <RightSidebar
+                rightSidebarOpen={true}
+                setRightSidebarOpen={setRightSidebarOpen}
+                sessionState={sessionState}
+                collapsedCtxCards={collapsedCtxCards}
+                setCollapsedCtxCards={setCollapsedCtxCards}
+              />
+            </div>
+          </div>
+        )}
 
       </div>
 
