@@ -416,6 +416,8 @@ export default function Page() {
 
   const resumeGeneration = useCallback(async () => {
     if (!activeId) return;
+    // 立即更新 UI（不用等后端响应）
+    setPaused(false);
     // 通知后端恢复（不创建新 fetch，现有 SSE 连接会收到 resumed 事件）
     try {
       await fetch(`${apiBase}/sessions/${activeId}/set_state`, {
