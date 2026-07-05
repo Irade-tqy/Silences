@@ -8,13 +8,13 @@ $Port = 1204
 Start-Process powershell -WorkingDirectory $WebDir -ArgumentList @(
     "-NoExit",
     "-Command",
-    "npm run dev"
+    "npm run build && npm run start"
 )
 
 Write-Host "[restart] 新窗口已启动，等待就绪..."
 
 # 第二步：等新进程绑定端口后，再杀旧进程
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 10
 
 $connections = netstat -ano | Select-String ":$Port\s"
 if ($connections) {

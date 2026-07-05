@@ -40,6 +40,21 @@ export interface RawToolCall {
   function: { name: string; arguments: string };
 }
 
+/** 后端 messages_to_view 处理后的工具调用格式（嵌入 result，无 id/type/function） */
+export interface ViewToolCall {
+  name: string;
+  args: string;
+  result?: string;
+}
+
+/** 后端 messages_to_view 处理后返回的消息格式 */
+export interface ViewMessage {
+  role: string;
+  content: string;
+  reasoning_content?: string;
+  tool_calls?: ViewToolCall[];
+}
+
 export interface RawMessage {
   role: string;
   content: string;

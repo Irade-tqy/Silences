@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Message, Session, AppSettings, SessionState, TokenUsage, RawMessage } from '@/types';
+import { Message, Session, AppSettings, SessionState, TokenUsage, ViewMessage } from '@/types';
 import Sidebar from '@/components/Sidebar';
 import ChatPanel from '@/components/ChatPanel';
 import RightSidebar from '@/components/RightSidebar';
@@ -182,15 +182,16 @@ export default function Page() {
     try {
       const res = await fetch(`${apiBase}/sessions/${id}/messages`);
       if (res.ok) {
-        const raw: RawMessage[] = await res.json();
-        const converted: Message[] = raw.map(r => ({
-          role: r.role as Message['role'],
-          content: r.content,
-          reasoning: r.reasoning_content,
-          toolCalls: r.tool_calls?.map(tc => ({
-            id: tc.id,
-            name: tc.function.name,
-            args: tc.function.arguments,
+        const view: ViewMessage[] = await res.json();
+        const converted: Message[] = view.map(v => ({
+          role: v.role as Message['role'],
+          content: v.content,
+          reasoning: v.reasoning_content,
+          toolCalls: v.tool_calls?.map(tc => ({
+            id: undefined,
+            name: tc.name,
+            args: tc.args,
+            result: tc.result,
           })),
         }));
         setMessages(converted);
