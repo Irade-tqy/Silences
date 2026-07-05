@@ -1,4 +1,4 @@
-//! find — 按文件名正则搜索
+//! find — 按文件名搜索
 
 use std::fs;
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
 
-use super::{expand_pattern, ToolDef, ToolOutcome};
+use super::{ToolDef, ToolOutcome};
 use silences_core::ToolLimits;
 
 static FIND_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -17,7 +17,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "find",
         description:
-            "按文件名正则表达式搜索指定目录下的文件。返回匹配文件的相对路径，按目录层级组织。将会跳过隐藏目录、node_modules、target。\nwhy: 需要快速定位文件名满足某种模式的文件时使用。\n提示: 反引号内为纯文本，可混写。如 `main.rs` 匹配字面 \"main.rs\"。[不可撤销]",
+            "按文件名搜索指定目录下的文件。返回匹配文件的相对路径，按目录层级组织。将会跳过隐藏目录、node_modules、target。\nwhy: 需要快速定位文件名满足某种模式的文件时使用。\nhint: regex=false（默认）纯文本匹配；regex=true 正则匹配。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -27,7 +27,11 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "文件名正则；反引号内纯文本，可混写。如 `main`\\.rs"
+                    "description": "regex=false 时纯文本搜索；regex=true 时为正则表达式"
+                },
+                "regex": {
+                    "type": "boolean",
+                    "description": "true=正则模式, false=纯文本搜索（默认）"
                 }
             },
             "required": ["path", "pattern"],
@@ -43,8 +47,14 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
 async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
-    let re_pattern = expand_pattern(raw_pattern);
-    let re = Regex::new(&re_pattern).context("正则表达式无效")?;
+    let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+
+    let re_pattern = if use_regex {
+        raw_pattern.to_string()
+    } else {
+        regex::escape(raw_pattern)
+    };
+    let re = Regex::new(&re_pattern).context("搜索模式无效")?;
 
     let meta = fs::metadata(path).context("路径不存在")?;
     if !meta.is_dir() {

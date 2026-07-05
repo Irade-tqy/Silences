@@ -1,4 +1,4 @@
-//! grep — 正则搜索（白名单扩展名 + 自动标准化）
+//! grep — 文本/正则搜索（白名单扩展名 + 自动标准化）
 //!
 //! AI 必须指定 extensions 参数声明要搜索的文件扩展名，grep 不会猜测。
 //! 安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。
@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use silences_core::ToolLimits;
 
-use super::{expand_pattern, normalize, read_file_robust, ToolDef, ToolOutcome};
+use super::{normalize, read_file_robust, ToolDef, ToolOutcome};
 
 static GREP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -23,7 +23,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "grep",
         description:
-            "在指定路径下搜索正则表达式匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名，grep 不会猜测扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\n提示: 反引号内的内容自动转义为纯文本，可与正则混写。如 `fn main()`*\n 匹配 \"fn main()\" 后跟正则 *\\n。\\` 在反引号内表示字面反引号。\n反例: 不要不加 extensions，否则会报错。[不可撤销]",
+            "在指定路径下搜索文本或正则匹配。\n**你必须指定 extensions** 声明要搜的文件扩展名。\n每个匹配返回上下各两行。结果超过 20 条时摘要截断，完整输出写入 console 目录。\n安全兜底：始终跳过隐藏目录、node_modules、target、tokenizer、api_debug.json。\nwhy: 需要精确定位代码中某个模式出现的位置时使用。\n注意: 会自动将 \\r\\n 转为 \\n，行首连续 tab 转为 4 空格后搜索。\nhint: regex=false（默认）纯文本搜索；regex=true 正则搜索。[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -33,7 +33,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "正则表达式；反引号内为纯文本，可混写。如 `fn()`abc 匹配 \"fn()\" + 正则 abc"
+                    "description": "regex=false 时纯文本搜索；regex=true 时为正则表达式"
                 },
                 "extensions": {
                     "type": "array",
@@ -45,6 +45,10 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                     "minimum": 0,
                     "maximum": 20,
                     "description": "匹配行上下各显示多少行上下文（可选，默认 2）。调大以查看函数签名或闭合括号。"
+                },
+                "regex": {
+                    "type": "boolean",
+                    "description": "true=正则模式, false=纯文本搜索（默认）"
                 }
             },
             "required": ["path", "pattern", "extensions"],
@@ -60,6 +64,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
 async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) -> Result<ToolOutcome> {
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
+    let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
     let extensions: HashSet<String> = args["extensions"]
         .as_array()
         .context("extensions 必须是数组")?
@@ -70,8 +75,12 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         anyhow::bail!("extensions 不能为空，请指定要搜索的文件扩展名，如 [\"rs\",\"ts\"]");
     }
 
-    let re_pattern = expand_pattern(raw_pattern);
-    let re = Regex::new(&re_pattern).context("正则表达式无效")?;
+    let re_pattern = if use_regex {
+        raw_pattern.to_string()
+    } else {
+        regex::escape(raw_pattern)
+    };
+    let re = Regex::new(&re_pattern).context("搜索模式无效")?;
 
     let ctx_lines = args.get("context_lines")
         .and_then(Value::as_u64)

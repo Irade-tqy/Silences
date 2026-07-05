@@ -46,7 +46,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "true=正则模式（默认），false=纯文本字面量模式"
+                    "description": "true=正则模式, false=纯文本字面量模式（默认）"
                 }
             },
             "required": ["file", "pattern", "replacement"],
@@ -64,7 +64,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let replacement = args["replacement"].as_str().context("缺少 replacement 参数")?;
     let target_line = args.get("line").and_then(Value::as_u64);
-    let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(true);
+    let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
 
     let original = read_file_robust(file)?;
 
