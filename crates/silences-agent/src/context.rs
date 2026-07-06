@@ -39,10 +39,13 @@ pub struct ProjectContext {
 /// 读取文件内容
 fn read_file(root: &Path, name: &str) -> Option<String> {
     let path = root.join(name);
-    if path.exists() {
-        std::fs::read_to_string(&path).ok()
-    } else {
-        None
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("[context] 读取文件失败 {}: {e}", path.display());
+            None
+        }
     }
 }
 
@@ -103,7 +106,9 @@ pub fn delete_session_context(project_root: &Path, session_id: &str) {
         .join("sessions")
         .join(session_id);
     if session_dir.exists() {
-        let _ = fs::remove_dir_all(&session_dir);
+        if let Err(e) = fs::remove_dir_all(&session_dir) {
+            eprintln!("[context] 删除会话目录失败: {e}");
+        }
     }
 }
 

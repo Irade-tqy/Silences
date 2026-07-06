@@ -20,7 +20,6 @@ export default function Sidebar({
     <div className="sidebar sidebar-left">
       <div className="sidebar-header">
         <div className="sidebar-title">Silences</div>
-        <button className="sidebar-new-btn" onClick={newSession} title="新会话" style={{ display: 'none' }}>+</button>
       </div>
 
       <button className="new-chat-btn" onClick={newSession}>

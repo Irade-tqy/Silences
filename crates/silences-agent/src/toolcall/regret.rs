@@ -65,16 +65,7 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
             Box::pin(async move {
                 let mut history = h.lock().await;
                 let summary = history.undo().unwrap_or_else(|e| format!("regret 失败: {e}"));
-                Ok(ToolOutcome {
-                    summary,
-                    inverse: None,
-                
-        rollback: false,
-                
-        approval_pending: None,
-                    inject_messages: vec![],
-            defer_rollback: false,
-        })
+                Ok(ToolOutcome::new(summary))
             })
         }),
     }

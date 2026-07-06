@@ -83,8 +83,6 @@ async fn pause_until_resumed(
     db: &tokio::sync::Mutex<Db>,
     active_runs: &tokio::sync::Mutex<HashMap<String, Arc<RunFlags>>>,
 ) -> bool {
-    eprintln!("[agent] session={} 暂停中，每 500ms 轮询 pause/stop 标志",
-        &session_id[..8.min(session_id.len())]);
     let mut was_paused = false;
     while flags.should_pause() {
         if !was_paused {
@@ -107,14 +105,10 @@ async fn pause_until_resumed(
                 let mut runs = active_runs.lock().await;
                 runs.remove(session_id);
             }
-            eprintln!("[agent] session={} 暂停中被停止，退出",
-                &session_id[..8.min(session_id.len())]);
             return true;
         }
     }
     let _ = tx.send(AgentEvent::Resumed).await;
-    eprintln!("[agent] session={} 已恢复运行",
-        &session_id[..8.min(session_id.len())]);
     false
 }
 
@@ -162,7 +156,7 @@ pub fn run_agent(
             let db_lock = db.lock().await;
             db_lock.get_max_message_id(&session_id).unwrap_or(None).unwrap_or(0)
         };
-        eprintln!("[agent] last_preserved_id={last_preserved_id} checkpoint={checkpoint}");
+        // last_preserved_id 初始化为数据库中的最大消息 ID
 
         // 累计用量（所有轮次叠加后发给前端，让 cost 面板实时显示）
         let mut total_usage: Option<TokenUsage> = None;
@@ -189,7 +183,6 @@ pub fn run_agent(
 
             // 检查外部停止信号
             if flags.should_stop() {
-                eprintln!("[agent] 收到停止信号，退出 agent 循环");
                 let _ = tx.send(AgentEvent::Error("已停止".into())).await;
                 {
                     let mut runs = active_runs.lock().await;
@@ -342,7 +335,7 @@ pub fn run_agent(
                         // ⚡ 预热下一轮稳定前缀 [SILENCES.md, user, ...summaries]
                         if warmup_enabled {
                             if let Err(e) = llm.warmup_prefix(&messages[..checkpoint], system.as_deref()).await {
-                                eprintln!("[agent] warmup 失败: {e}");
+                                eprintln!("[agent] 警告: warmup 失败: {e}");
                             }
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await; // 等缓存稳定
                         }
@@ -708,7 +701,7 @@ pub async fn prepare_agent_context(
     project_root: Option<&Path>,
     session_id: Option<String>,
     user_message: &str,
-    system: Option<&str>,
+    _system: Option<&str>,
 ) -> anyhow::Result<PreparedContext> {
     // 解析会话 ID
     let is_new = session_id.as_ref().map_or(true, |s| s.is_empty());
@@ -719,7 +712,9 @@ pub async fn prepare_agent_context(
         let sid = db.create_session()?;
         // 新会话初始化上下文文件
         if let Some(root) = project_root {
-            let _ = context::init_session_context(root, &sid);
+            if let Err(e) = context::init_session_context(root, &sid) {
+                eprintln!("[agent] 初始化会话上下文失败: {e}");
+            }
         }
         sid
     };
@@ -746,28 +741,6 @@ pub async fn prepare_agent_context(
     }
     messages.extend(history);
 
-    // 日志输出
-    eprintln!("——[prepare_agent_context]————————————————————————");
-    eprintln!("  session={} msgs={} new={} silences={}",
-        &session_id[..8.min(session_id.len())],
-        messages.len(),
-        is_new,
-        ctx.silences_md.is_some(),
-    );
-    for (i, msg) in messages.iter().enumerate() {
-        let preview: String = msg.content.chars().take(120).collect();
-        let rc = if msg.reasoning_content.is_some() { " +reasoning" } else { "" };
-        let tc = if msg.tool_calls.is_some() { " +tool_calls" } else { "" };
-        let name_tag = msg.name.as_ref().map(|n| format!(" @{n}")).unwrap_or_default();
-        eprintln!("  [{i}][{}]{name_tag}{rc}{tc} {}",
-            msg.role,
-            if msg.content.len() > 120 { format!("{}...", preview) } else { preview },
-        );
-    }
-    if let Some(sys) = system {
-        let clipped: String = sys.chars().take(120).collect();
-        eprintln!("  [system] {clipped}...");
-    }
 
     Ok(PreparedContext {
         session_id,

@@ -69,6 +69,20 @@ pub struct ToolOutcome {
     pub defer_rollback: bool,
 }
 
+impl ToolOutcome {
+    /// 创建一个简单的成功 ToolOutcome（带 summary，其他字段为默认值）
+    pub fn new(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            inverse: None,
+            rollback: false,
+            approval_pending: None,
+            inject_messages: vec![],
+            defer_rollback: false,
+        }
+    }
+}
+
 impl fmt::Debug for ToolOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ToolOutcome")
@@ -127,53 +141,6 @@ pub fn normalize(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// 展开 pattern 中的反引号转义区域：
-/// `` `literal text` `` → 内部自动 regex::escape（纯文本匹配）
-/// `\`` 在反引号区域内表示字面反引号
-/// 反引号外的部分保持原样（正则表达式）
-///
-/// 示例：
-/// `` `fn main()`*\n `` → 匹配 "fn main()" 后跟正则 `*\n`
-/// `` `def reg():` `` → 匹配字面 "def reg():"
-pub fn expand_pattern(pattern: &str) -> String {
-    let mut result = String::new();
-    let mut chars = pattern.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '`' {
-            // 进入纯文本区域：收集到未转义的反引号为止
-            let mut literal = String::new();
-            loop {
-                match chars.next() {
-                    None => {
-                        // 未闭合的反引号 — 当成字面量处理
-                        result.push('`');
-                        result.push_str(&literal);
-                        break;
-                    }
-                    Some('`') => {
-                        // 纯文本区域结束
-                        result.push_str(&regex::escape(&literal));
-                        break;
-                    }
-                    Some('\\') if chars.peek() == Some(&'`') => {
-                        // 转义的反引号 \`
-                        chars.next();
-                        literal.push('`');
-                    }
-                    Some(c) => {
-                        literal.push(c);
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
 }
 
 /// 编码鲁棒的文件读取函数。

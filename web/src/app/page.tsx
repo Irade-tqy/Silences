@@ -17,12 +17,10 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [totalUsage, setTotalUsage] = useState<TokenUsage | null>(null);
-  const [roundUsage, setRoundUsage] = useState<TokenUsage | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [collapsedThinking, setCollapsedThinking] = useState<Record<number, boolean>>({});
   const [collapsedToolCalls, setCollapsedToolCalls] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null, warmup_enabled: true });
   const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true });
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -55,26 +53,21 @@ export default function Page() {
     try {
       const res = await fetch(`${apiBase}/sessions`);
       if (res.ok) setSessions(await res.json());
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('loadSessions 失败:', e); }
   }, [apiBase]);
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
-
-  const settingsDirtyRef = useRef<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true });
-  useEffect(() => { settingsDirtyRef.current = settingsDirty; }, [settingsDirty]);
 
   const loadSettings = useCallback(async () => {
     try {
       const res = await fetch(`${apiBase}/settings?t=${Date.now()}`);
       if (res.ok) {
         const data: AppSettings = await res.json();
-        console.log('GET /settings 响应:', data);
         setSettings(data);
         setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled });
       } else {
         console.warn('GET /settings 失败:', res.status);
       }
-      setSettingsLoaded(true);
     } catch (e) {
       console.warn('加载设置失败:', e);
     }
@@ -84,7 +77,6 @@ export default function Page() {
     setActiveId(null);
     setMessages([]);
     setTotalUsage(null);
-    setRoundUsage(null);
     setPaused(false);
     abortRef.current?.abort();
     if (isMobile) setMobilePage('chat');
@@ -97,7 +89,7 @@ export default function Page() {
       try {
         const res = await fetch(`${apiBase}/sessions/${activeId}/state`);
         if (res.ok) setSessionState(await res.json());
-      } catch { /* ignore */ }
+      } catch (e) { console.warn('session state 轮询失败:', e); }
     };
     fetchState();
     const interval = setInterval(fetchState, loading ? 2000 : 5000);
@@ -153,7 +145,7 @@ export default function Page() {
   const saveSettings = useCallback(async () => {
     setSettingsSaving(true);
     try {
-      const cur = settingsDirtyRef.current;
+      const cur = settingsDirty;
       const body: Record<string, string | null | boolean> = {};
       if (cur.api_key && cur.api_key.length > 0) {
         body.api_key = cur.api_key;
@@ -172,13 +164,12 @@ export default function Page() {
     } finally {
       setSettingsSaving(false);
     }
-  }, [apiBase, loadSettings]);
+  }, [apiBase, loadSettings, settingsDirty]);
 
   const selectSession = useCallback(async (id: string) => {
     setActiveId(id);
     setMessages([]);
     setTotalUsage(null);
-    setRoundUsage(null);
     setPaused(false);
     abortRef.current?.abort();
     try {
@@ -201,7 +192,7 @@ export default function Page() {
       }
       const usageRes = await fetch(`${apiBase}/sessions/${id}/usage`);
       if (usageRes.ok) setTotalUsage(await usageRes.json());
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('selectSession 失败:', e); }
   }, [apiBase, isMobile]);
 
   const sendMessage = useCallback(async () => {
@@ -265,7 +256,7 @@ export default function Page() {
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
+          const data = line.replace(/^data:\s*/, '').trim();
           if (!data) continue;
 
           try {
@@ -358,7 +349,7 @@ export default function Page() {
                 return [...copy, { role: 'assistant', content: '', isStreaming: true, reasoning: '' }];
               });
             }
-          } catch { /* ignore parse errors */ }
+          } catch (e) { console.warn('SSE JSON 解析失败:', e, data); }
         }
       }
     } catch (err: unknown) {
@@ -386,7 +377,7 @@ export default function Page() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' }),
       });
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('stopGeneration 失败:', e); }
     abortRef.current?.abort();
     setPaused(false);
     setMessages(prev => {
@@ -413,7 +404,7 @@ export default function Page() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'pause' }),
       });
-    } catch { /* ignore network errors */ }
+    } catch (e) { console.warn('pauseGeneration 失败:', e); }
   }, [activeId, apiBase]);
 
   const resumeGeneration = useCallback(async () => {
@@ -427,7 +418,7 @@ export default function Page() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'resume' }),
       });
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('resumeGeneration 失败:', e); }
   }, [activeId, apiBase]);
 
   return (
@@ -456,7 +447,6 @@ export default function Page() {
             loading={loading}
             paused={paused}
             totalUsage={totalUsage}
-            roundUsage={roundUsage}
             activeId={activeId}
             sessions={sessions}
             rightSidebarOpen={rightSidebarOpen}
@@ -531,7 +521,6 @@ export default function Page() {
                 loading={loading}
                 paused={paused}
                 totalUsage={totalUsage}
-                roundUsage={roundUsage}
                 activeId={activeId}
                 sessions={sessions}
                 rightSidebarOpen={rightSidebarOpen}

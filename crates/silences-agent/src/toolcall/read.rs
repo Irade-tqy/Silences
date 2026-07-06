@@ -78,16 +78,7 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
     };
 
     if content.is_empty() {
-        return Ok(ToolOutcome {
-            summary: format!("[空文件] {}{}", path, warning),
-            inverse: None,
-
-        rollback: false,
-
-        approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        });
+        return Ok(ToolOutcome::new(format!("[空文件] {}{}", path, warning)));
     }
 
     // 自动截断：仅当 all=false 且未指定显式行范围时才生效
@@ -136,14 +127,5 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
     }
     drop(tracker);
 
-    Ok(ToolOutcome {
-        summary,
-        inverse: None,
-
-        rollback: false,
-
-        approval_pending: None,
-        inject_messages: vec![],
-            defer_rollback: false,
-        })
+    Ok(ToolOutcome::new(summary))
 }

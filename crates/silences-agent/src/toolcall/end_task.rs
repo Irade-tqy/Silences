@@ -40,7 +40,6 @@ pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
                 // 标记为已完成（从待处理移到已完成列表）
                 q.complete_task(&task_id);
                 let msg = format!("[完成任务] {}: {}", task_id, summary);
-                eprintln!("{msg}");
                 Ok(ToolOutcome {
                     summary: msg,
                     inverse: None,

@@ -111,14 +111,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
                 }
             )
         };
-        return Ok(ToolOutcome {
-            summary: feedback,
-            inverse: None,
-            rollback: false,
-            approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        });
+        return Ok(ToolOutcome::new(feedback));
     }
 
     let file_list: Vec<String> = changed_files

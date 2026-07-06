@@ -235,7 +235,6 @@ async fn handle_chat(
             context.push(Message::new_tool_result(&start_tc_id, &outcome.summary));
         }
 
-        eprintln!("[auto-task] 自动包装为任务: {task_id}");
     }
 
     // 如果该 session 已有活跃运行，先停止旧标志
@@ -243,8 +242,6 @@ async fn handle_chat(
         let mut runs = state.active_runs.lock().await;
         if let Some(old) = runs.remove(&session_id) {
             old.signal_stop();
-            eprintln!("[chat] session={} 已有活跃 agent，已发停止信号",
-                &session_id[..8.min(session_id.len())]);
         }
     }
 
@@ -254,7 +251,6 @@ async fn handle_chat(
         let mut runs = state.active_runs.lock().await;
         runs.insert(session_id.clone(), flags.clone());
     }
-    eprintln!("[chat] session={} 注册运行标志", &session_id[..8.min(session_id.len())]);
 
     // 启动 agent 循环（传入 session_dir 用于读写 CONTEXT.md）
     let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
@@ -370,11 +366,6 @@ async fn handle_get_settings(
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
     let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
     let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
-    eprintln!("[GET /settings] api_key={:?} system_prompt={:?} tool_delay_ms={} warmup_enabled={}",
-        masked.as_deref().unwrap_or("(none)"),
-        system_prompt.as_deref().unwrap_or("(none)"),
-        tool_delay_ms,
-        warmup_enabled);
     Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled }))
 }
 
@@ -383,12 +374,6 @@ async fn handle_put_settings(
     State(state): State<Arc<AppState>>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<Settings>, (StatusCode, String)> {
-    eprintln!("[PUT /settings] api_key={:?} system_prompt={:?} tool_delay_ms={:?}",
-        update.api_key.as_ref().map(|_| "(provided)"),
-        update.system_prompt.as_deref(),
-        update.tool_delay_ms,
-    );
-
     // 更新 API key（如果提供了）
     if let Some(ref key) = update.api_key {
         if !key.is_empty() {
@@ -396,7 +381,6 @@ async fn handle_put_settings(
             // 持久化到 DB
             let db = state.db.lock().await;
             let _ = db.set_setting("api_key", key);
-            eprintln!("[PUT /settings] API key 已更新");
         }
     }
     // 更新 system prompt
@@ -411,10 +395,8 @@ async fn handle_put_settings(
         let db = state.db.lock().await;
         if sp.is_empty() {
             let _ = db.delete_setting("system_prompt");
-            eprintln!("[PUT /settings] system prompt 已清除");
         } else {
             let _ = db.set_setting("system_prompt", sp);
-            eprintln!("[PUT /settings] system prompt 已保存");
         }
     }
     // 更新 tool delay
@@ -422,14 +404,12 @@ async fn handle_put_settings(
         state.tool_delay_ms.store(delay, std::sync::atomic::Ordering::Relaxed);
         let db = state.db.lock().await;
         let _ = db.set_setting("tool_delay_ms", &delay.to_string());
-        eprintln!("[PUT /settings] tool_delay_ms 已更新: {}ms", delay);
     }
     // 更新 warmup 开关
     if let Some(enabled) = update.warmup_enabled {
         state.warmup_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
         let db = state.db.lock().await;
         let _ = db.set_setting("warmup_enabled", &(enabled as u8).to_string());
-        eprintln!("[PUT /settings] warmup_enabled 已更新: {enabled}");
     }
 
     // 返回当前设置
@@ -535,8 +515,6 @@ async fn handle_session_state(
             "idle".to_string()
         }
     };
-    eprintln!("[GET /sessions/{}/state] context={} tasks={} status={}",
-        &id[..8.min(id.len())], context.len(), tasks.len(), status);
     Ok(Json(SessionState { context, tasks, status }))
 }
 
@@ -550,7 +528,6 @@ async fn handle_rename_session(
     db.rename_session(&id, &req.name).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
     })?;
-    eprintln!("[RENAME] session={} name={:?}", &id[..8.min(id.len())], req.name);
     Ok(Json(()))
 }
 
@@ -573,7 +550,6 @@ async fn handle_delete_session(
     if let Some(ref root) = state.project_root {
         silences_agent::context::delete_session_context(root, &id);
     }
-    eprintln!("[DELETE] session={}", &id[..8.min(id.len())]);
     Ok(Json(()))
 }
 
@@ -588,7 +564,6 @@ async fn handle_set_state(
             let runs = state.active_runs.lock().await;
             if let Some(f) = runs.get(&id) {
                 f.signal_pause();
-                eprintln!("[SET_STATE] session={} 暂停", &id[..8.min(id.len())]);
                 Ok(Json(()))
             } else {
                 Err((StatusCode::BAD_REQUEST, "没有正在运行的 agent".into()))
@@ -598,7 +573,6 @@ async fn handle_set_state(
             let runs = state.active_runs.lock().await;
             if let Some(f) = runs.get(&id) {
                 f.signal_resume();
-                eprintln!("[SET_STATE] session={} 恢复", &id[..8.min(id.len())]);
                 Ok(Json(()))
             } else {
                 Err((StatusCode::BAD_REQUEST, "没有正在运行的 agent".into()))
@@ -608,10 +582,8 @@ async fn handle_set_state(
             let mut runs = state.active_runs.lock().await;
             if let Some(f) = runs.remove(&id) {
                 f.signal_stop();
-                eprintln!("[SET_STATE] session={} 停止", &id[..8.min(id.len())]);
                 Ok(Json(()))
             } else {
-                eprintln!("[SET_STATE] session={} 无正在运行的 agent", &id[..8.min(id.len())]);
                 Ok(Json(())) // 幂等
             }
         }

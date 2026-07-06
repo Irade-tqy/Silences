@@ -39,28 +39,13 @@ pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
                 if removed.is_some() {
                     q.set_active(&task_id, desc);
                     let summary = format!("[开始任务] {}: {} ({})", task_id, desc, queue_status);
-                    eprintln!("{summary}");
-                    Ok(ToolOutcome {
-                        summary,
-                        inverse: None,
-                        rollback: false,
-                        approval_pending: None,
-                        inject_messages: vec![],
-                        defer_rollback: false,
-                    })
+                    Ok(ToolOutcome::new(summary))
                 } else {
                     // 队列中不存在该 ID —— 可能已完成或从未添加
                     let err = format!("[start_task] 错误: 队列中不存在任务 \"{task_id}\"。可能已被移除或从未添加。可用 add_task 先添加。");
-                    eprintln!("{err}");
+                    // 不 eprintln 此错误，因为 summary 已包含错误信息
                     // 返回普通结果，不是 Err，这样 LLM 可以恢复
-                    Ok(ToolOutcome {
-                        summary: err,
-                        inverse: None,
-                        rollback: false,
-                        approval_pending: None,
-                        inject_messages: vec![],
-                        defer_rollback: false,
-                    })
+                    Ok(ToolOutcome::new(err))
                 }
             })
         }),

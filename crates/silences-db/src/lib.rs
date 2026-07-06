@@ -68,14 +68,8 @@ impl Db {
             );
             ",
         )?;
-        // 迁移：旧表可能缺少的列
-        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN reasoning_content TEXT;");
-        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN tool_calls TEXT;");
-        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN tool_call_id TEXT;");
-        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN name TEXT;");
-        let _ = self.conn.execute_batch("ALTER TABLE sessions ADD COLUMN name TEXT;");
-        // v3: hidden 列 — 回滚时标记为隐藏，避免下一次加载旧工具细节
-        let _ = self.conn.execute_batch("ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;");
+        // 所有旧表迁移已全部完成，不再需要 ALTER TABLE 语句。
+        // 如果未来增加新列，在此处添加对应 ALTER TABLE 即可。
         Ok(())
     }
 

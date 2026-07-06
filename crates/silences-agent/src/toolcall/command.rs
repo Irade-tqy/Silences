@@ -121,14 +121,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         summary.push_str(&format!("\n退出码: {}", code));
     }
 
-    Ok(ToolOutcome {
-        summary,
-        inverse: None,
-        rollback: false,
-        approval_pending: None,
-        inject_messages: vec![],
-        defer_rollback: false,
-    })
+    Ok(ToolOutcome::new(summary))
 }
 
 fn timestamp() -> String {
@@ -146,7 +139,9 @@ fn save_console_file(console_dir: &Option<PathBuf>, command: &str, stream: &str,
         Some(d) => d.clone(),
         None => return "（未保存，无会话目录）".into(),
     };
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[toolcall] 创建 console 目录失败: {e}");
+    }
     let ts = timestamp();
     let tag: String = command
         .chars()
@@ -155,6 +150,8 @@ fn save_console_file(console_dir: &Option<PathBuf>, command: &str, stream: &str,
         .collect();
     let tag = if tag.is_empty() { "cmd".to_string() } else { tag };
     let file_path = dir.join(format!("{}_{}_{}.out", ts, tag, stream));
-    let _ = std::fs::write(&file_path, content);
+    if let Err(e) = std::fs::write(&file_path, content) {
+        eprintln!("[toolcall] 写入 console 文件失败: {e}");
+    }
     file_path.to_string_lossy().to_string()
 }

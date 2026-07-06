@@ -12,7 +12,6 @@ interface ChatPanelProps {
   loading: boolean;
   paused: boolean;
   totalUsage: TokenUsage | null;
-  roundUsage: TokenUsage | null;
   activeId: string | null;
   sessions: Session[];
   rightSidebarOpen: boolean;

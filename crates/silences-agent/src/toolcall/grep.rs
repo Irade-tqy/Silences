@@ -106,14 +106,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         } else {
             format!("grep: 无匹配 \"{}\" (仅扩展名: {:?})", raw_pattern, extensions)
         };
-        return Ok(ToolOutcome {
-            summary,
-            inverse: None,
-            rollback: false,
-            approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        });
+        return Ok(ToolOutcome::new(summary));
     }
 
     let total_matches: usize = results.iter().map(|(_, count)| count).sum();
@@ -125,14 +118,10 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
 
     if total_matches <= limits.grep_max_shown_matches {
         // 没超限，正常返回全部结果
-        return Ok(ToolOutcome {
-            summary: format!("grep \"{}\" 匹配 {} 处:\n{}", raw_pattern, total_matches, summary_text),
-            inverse: None,
-            rollback: false,
-            approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        });
+        return Ok(ToolOutcome::new(format!(
+            "grep \"{}\" 匹配 {} 处:\n{}",
+            raw_pattern, total_matches, summary_text,
+        )));
     }
 
     // 超过上限：摘要只显示前 N 条
@@ -164,19 +153,12 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         None => format!("\n...以及 {over_count} 条匹配（共 {total_matches} 条），未设置 console 目录，请缩小搜索范围。\n"),
     };
 
-    Ok(ToolOutcome {
-        summary: format!(
-            "grep \"{}\" 匹配 {} 处（显示前 {} 条）:\n{}{}",
-            raw_pattern, total_matches, limits.grep_max_shown_matches,
-            truncated.join("\n---\n"),
-            suffix,
-        ),
-        inverse: None,
-        rollback: false,
-        approval_pending: None,
-        inject_messages: vec![],
-        defer_rollback: false,
-    })
+    Ok(ToolOutcome::new(format!(
+        "grep \"{}\" 匹配 {} 处（显示前 {} 条）:\n{}{}",
+        raw_pattern, total_matches, limits.grep_max_shown_matches,
+        truncated.join("\n---\n"),
+        suffix,
+    )))
 }
 
 fn search_dir(

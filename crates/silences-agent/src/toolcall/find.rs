@@ -83,16 +83,10 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     search_dir(path, path, &re, &extensions, &mut results);
 
     if results.is_empty() {
-        return Ok(ToolOutcome {
-            summary: format!("find: 在 {} 中无匹配 \"{}\" (仅扩展名: {:?})", path, raw_pattern, extensions),
-            inverse: None,
-
-        rollback: false,
-
-        approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        });
+        return Ok(ToolOutcome::new(format!(
+            "find: 在 {} 中无匹配 \"{}\" (仅扩展名: {:?})",
+            path, raw_pattern, extensions,
+        )));
     }
 
     let total = results.len();
@@ -100,16 +94,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         let header = format!("find \"{}\" in {}:\n", raw_pattern, path);
         let body = results.join("\n");
         let footer = format!("\n── 共 {} 个匹配", total);
-        Ok(ToolOutcome {
-            summary: format!("{header}{body}{footer}"),
-            inverse: None,
-        
-        rollback: false,
-        
-        approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        })
+        Ok(ToolOutcome::new(format!("{header}{body}{footer}")))
     } else {
         let mut shown = Vec::new();
         for r in &results[..limits.find_max_shown_items] {
@@ -120,19 +105,10 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
 
         let header = format!("find \"{}\" in {}:\n", raw_pattern, path);
         let body = shown.join("\n");
-        Ok(ToolOutcome {
-            summary: format!(
-                "{}{}\n...以及 {} 个匹配（共 {} 个），完整输出: {}\n",
-                header, body, over, total, file_path
-            ),
-            inverse: None,
-        
-        rollback: false,
-        
-        approval_pending: None,
-            inject_messages: vec![],
-            defer_rollback: false,
-        })
+        Ok(ToolOutcome::new(format!(
+            "{}{}\n...以及 {} 个匹配（共 {} 个），完整输出: {}\n",
+            header, body, over, total, file_path
+        )))
     }
 }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { AppSettings } from '@/types';
 
 interface SettingsModalProps {
@@ -19,8 +19,6 @@ export default function SettingsModal({
   settings, settingsDirty, setSettingsDirty,
   settingsSaving, saveSettings, loadSettings,
 }: SettingsModalProps) {
-  const settingsLoadedRef = useRef(false);
-
   useEffect(() => {
     if (settingsOpen) loadSettings();
   }, [settingsOpen, loadSettings]);

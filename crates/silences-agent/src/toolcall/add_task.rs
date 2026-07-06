@@ -36,15 +36,7 @@ pub fn tool(queue: Arc<TaskQueue>) -> ToolDef {
                 q.add(id.clone(), description.clone());
 
                 let summary = format!("[添加任务] {}: {}", id, description);
-                eprintln!("{summary}");
-                Ok(ToolOutcome {
-                    summary,
-                    inverse: None,
-                    rollback: false,
-                    approval_pending: None,
-                    inject_messages: vec![],
-                    defer_rollback: false,
-                })
+                Ok(ToolOutcome::new(summary))
             })
         }),
     }

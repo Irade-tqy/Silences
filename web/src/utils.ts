@@ -29,7 +29,7 @@ export function fmtCost(yuan: number) {
 }
 
 export function copyText(text: string) {
-  navigator.clipboard.writeText(text).catch(() => {});
+  navigator.clipboard.writeText(text).catch(e => console.warn('复制到剪贴板失败:', e));
 }
 
 export function fmtNum(n: number): string {

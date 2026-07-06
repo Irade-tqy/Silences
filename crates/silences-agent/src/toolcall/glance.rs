@@ -58,14 +58,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         glance_file(path, limits)?
     };
 
-    Ok(ToolOutcome {
-        summary,
-        inverse: None,
-        rollback: false,
-        approval_pending: None,
-        inject_messages: vec![],
-        defer_rollback: false,
-    })
+    Ok(ToolOutcome::new(summary))
 }
 
 fn glance_dir(path: &str) -> Result<(String, usize)> {

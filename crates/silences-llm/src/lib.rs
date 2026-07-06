@@ -143,7 +143,6 @@ impl LlmClient {
             cache_miss_tokens: usage.as_ref().map(|u| u.cache_miss_tokens).unwrap_or(0),
         };
 
-        eprintln!("[warmup] {} tok (miss {})", info.total_tokens, info.cache_miss_tokens);
         Ok(info)
     }
 
@@ -153,21 +152,6 @@ impl LlmClient {
             eprintln!("[llm] 警告: 无法加载 tokenizer {path}");
         }
         self
-    }
-
-    /// 计算 messages 文本的 token 数（精确 + 回退估算）
-    #[allow(dead_code)]
-    fn count_tokens(&self, messages: &[Message], system: Option<&str>) -> usize {
-        let text = build_counting_text(messages, system);
-        if let Some(ref tok) = self.tokenizer {
-            if let Ok(enc) = tok.encode(text.as_str(), true) {
-                return enc.len();
-            }
-        }
-        // 回退：中文 ~1/2，英文 ~1/4，+50 JSON 开销
-        let cjk = text.chars().filter(|&c| c as u32 > 0x7F).count();
-        let ascii = text.chars().filter(|&c| c as u32 <= 0x7F).count();
-        cjk / 2 + ascii / 4 + 50
     }
 
     /// 构建 API messages JSON（含工具调用）
@@ -305,24 +289,6 @@ impl LlmClient {
 }
 
 
-/// 把 messages + system 拼成一段文本用于 token 计数
-#[allow(dead_code)]
-fn build_counting_text(messages: &[Message], system: Option<&str>) -> String {
-    let mut text = String::new();
-    if let Some(s) = system {
-        text.push_str("system: ");
-        text.push_str(s);
-        text.push('\n');
-    }
-    for msg in messages {
-        text.push_str(&msg.role);
-        text.push_str(": ");
-        text.push_str(&msg.content);
-        text.push('\n');
-    }
-    text
-}
-
 /// 流式消息片段
 #[derive(Debug, Clone)]
 pub enum StreamDelta {
@@ -376,7 +342,6 @@ impl ChatStream {
 
                 if let Some(usage_val) = val.get("usage") {
                     if !usage_val.is_null() {
-                        eprintln!("<<< usage: {}", usage_val);
                         self.usage = Some(parse_usage(usage_val));
                     }
                 }
