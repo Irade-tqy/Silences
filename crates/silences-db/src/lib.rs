@@ -32,7 +32,8 @@ impl Db {
             "
             CREATE TABLE IF NOT EXISTS sessions (
                 id          TEXT PRIMARY KEY,
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                name        TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -41,6 +42,10 @@ impl Db {
                 role        TEXT NOT NULL,
                 content     TEXT NOT NULL,
                 reasoning_content TEXT,
+                name        TEXT,
+                tool_calls  TEXT,
+                tool_call_id TEXT,
+                hidden      INTEGER DEFAULT 0,
                 created_at  TEXT NOT NULL
             );
 
@@ -68,8 +73,6 @@ impl Db {
             );
             ",
         )?;
-        // 所有旧表迁移已全部完成，不再需要 ALTER TABLE 语句。
-        // 如果未来增加新列，在此处添加对应 ALTER TABLE 即可。
         Ok(())
     }
 
