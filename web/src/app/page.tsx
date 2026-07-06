@@ -87,7 +87,8 @@ export default function Page() {
     setRoundUsage(null);
     setPaused(false);
     abortRef.current?.abort();
-  }, []);
+    if (isMobile) setMobilePage('chat');
+  }, [isMobile]);
 
   // 轮询会话运行时状态（右侧边栏数据）
   useEffect(() => {
@@ -320,7 +321,8 @@ export default function Page() {
                 });
               }
             } else if (parsed.type === 'usage') {
-              setRoundUsage({
+              // 后端直接发送累计 total，覆盖即可
+              setTotalUsage({
                 input_tokens: parsed.input_tokens,
                 output_tokens: parsed.output_tokens,
                 cache_hit_tokens: parsed.cache_hit_tokens,

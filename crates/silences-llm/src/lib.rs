@@ -226,6 +226,10 @@ impl LlmClient {
                 json!(msg.content)
             };
             let mut m = json!({"role": msg.role, "content": content_val});
+            // DeepSeek thinking 模式：所有 assistant 消息必须携带 reasoning_content
+            if msg.role == "assistant" {
+                m["reasoning_content"] = json!(msg.reasoning_content.as_deref().unwrap_or(""));
+            }
             if let Some(ref name) = msg.name {
                 m["name"] = json!(name);
             }
@@ -523,6 +527,7 @@ fn log_api_request(dir: &std::path::Path, body: &Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use silences_core::{ToolCallFunction, ToolCallValue};
 
     #[test]
     fn test_parse_usage_v4() {
@@ -554,5 +559,141 @@ mod tests {
         let u = parse_usage(&val);
         assert_eq!(u.cache_hit_tokens, 0);
         assert_eq!(u.cache_miss_tokens, 500);
+    }
+
+    // ── build_api_messages: reasoning_content ──────────────────────────
+
+    #[test]
+    fn test_build_api_messages_assistant_with_reasoning() {
+        let mut msg = Message::new("assistant", "你好，我是助手。");
+        msg.reasoning_content = Some("让我想想……".into());
+        let result = LlmClient::build_api_messages(&[msg], None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["reasoning_content"], "让我想想……");
+    }
+
+    #[test]
+    fn test_build_api_messages_assistant_without_reasoning() {
+        // assistant 消息没有 reasoning_content → 必须补 ""
+        let msg = Message::new("assistant", "你好。");
+        let result = LlmClient::build_api_messages(&[msg], None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["reasoning_content"], "");
+    }
+
+    #[test]
+    fn test_build_api_messages_user_no_reasoning() {
+        // user 消息不能有 reasoning_content
+        let msg = Message::new("user", "用户提问");
+        let result = LlmClient::build_api_messages(&[msg], None);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_build_api_messages_tool_no_reasoning() {
+        // tool 消息不能有 reasoning_content
+        let mut msg = Message::new("tool", "{\"result\": \"ok\"}");
+        msg.tool_call_id = Some("call_123".into());
+        // 需要一个 assistant 先声明 tool_call_id，否则 tool 会被当作孤儿跳过
+        let asst_with_declare = Message::new_tool_call(vec![
+            ToolCallValue {
+                id: "call_123".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "get_weather".into(),
+                    arguments: "{}".into(),
+                },
+            },
+        ]);
+        let result = LlmClient::build_api_messages(&[asst_with_declare, msg], None);
+        assert_eq!(result.len(), 2);
+        assert!(result[1].get("reasoning_content").is_none());
+        // assistant 还是要有 reasoning_content
+        assert_eq!(result[0]["reasoning_content"], "");
+    }
+
+    #[test]
+    fn test_build_api_messages_assistant_with_tool_calls_no_reasoning() {
+        // assistant 有 tool_calls + 文本内容但无 reasoning → reasoning_content 必须补 ""
+        let mut asst = Message::new("assistant", "我来搜索一下。");
+        asst.tool_calls = Some(vec![
+            ToolCallValue {
+                id: "call_456".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "search".into(),
+                    arguments: "{\"q\":\"test\"}".into(),
+                },
+            },
+        ]);
+        let result = LlmClient::build_api_messages(&[asst], None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["reasoning_content"], "");
+    }
+
+    #[test]
+    fn test_build_api_messages_system_no_reasoning() {
+        // system 消息不应有 reasoning_content
+        let result = LlmClient::build_api_messages(&[], Some("你是助手。"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "system");
+        assert!(result[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_build_api_messages_mixed_roles() {
+        // 混合场景：user → assistant(有思考) → tool → assistant(无思考) → user
+        let msgs = vec![
+            Message::new("user", "今天天气如何？"),
+            {
+                let mut m = Message::new("assistant", "让我查一下天气。");
+                m.reasoning_content = Some("分析用户意图……".into());
+                m
+            },
+            {
+                let mut m = Message::new("user", "谢谢。");
+                m.name = Some("user".into());
+                m
+            },
+        ];
+        let result = LlmClient::build_api_messages(&msgs, Some("你是一个天气助手。"));
+        // system + 3 messages
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0]["role"], "system");
+        assert!(result[0].get("reasoning_content").is_none());
+        assert_eq!(result[1]["role"], "user");
+        assert!(result[1].get("reasoning_content").is_none());
+        assert_eq!(result[2]["role"], "assistant");
+        assert_eq!(result[2]["reasoning_content"], "分析用户意图……");
+        assert_eq!(result[3]["role"], "user");
+        assert!(result[3].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_build_api_messages_orphan_assistant_skipped() {
+        // 孤立 tool_call 且 content 为空 → 整条 assistant 跳过，不应产生 reasoning_content 问题
+        let asst = Message::new_tool_call(vec![
+            ToolCallValue {
+                id: "call_orphan".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                },
+            },
+        ]);
+        let result = LlmClient::build_api_messages(&[asst], None);
+        // 没有对应的 tool_result → 整条跳过
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_build_api_messages_orphan_tool_result_skipped() {
+        // 孤立的 tool result（无对应 assistant 声明）→ 跳过
+        let mut tool_msg = Message::new("tool", "结果");
+        tool_msg.tool_call_id = Some("call_nonexistent".into());
+        let result = LlmClient::build_api_messages(&[tool_msg], None);
+        assert_eq!(result.len(), 0);
     }
 }

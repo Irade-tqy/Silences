@@ -144,6 +144,9 @@ pub fn run_agent(
         };
         eprintln!("[agent] last_preserved_id={last_preserved_id} checkpoint={checkpoint}");
 
+        // 累计用量（所有轮次叠加后发给前端，让 cost 面板实时显示）
+        let mut total_usage: Option<TokenUsage> = None;
+
         for round in 0..usize::MAX {
             // 快照当前上下文供 /state 端点查询（在 stop 检查前，确保 stop 时也能拿到最新状态）
             {
@@ -266,9 +269,18 @@ pub fn run_agent(
                     messages.push(final_asst); // 纳入内存，供退出快照捕获
                 }
 
-                // 保存用量
+                // 保存用量（发送累计值）
                 if let Some(ref u) = usage {
-                    let _ = tx.send(AgentEvent::Usage(u.clone())).await;
+                    let total = total_usage.as_ref().map(|t|
+                        TokenUsage::new(
+                            t.input_tokens + u.input_tokens,
+                            t.output_tokens + u.output_tokens,
+                            t.cache_hit_tokens + u.cache_hit_tokens,
+                            t.cache_miss_tokens + u.cache_miss_tokens,
+                        )
+                    ).unwrap_or_else(|| u.clone());
+                    total_usage = Some(total.clone());
+                    let _ = tx.send(AgentEvent::Usage(total)).await;
                     {
                         let db_lock = db.lock().await;
                         let _ = db_lock.save_usage(&session_id, round as u32, u);
@@ -397,9 +409,18 @@ pub fn run_agent(
             }
             messages.push(asst_msg);
 
-            // 保存本轮 usage（tool call 轮次的 API 用量）
+            // 保存本轮 usage（tool call 轮次的 API 用量，发送累计值）
             if let Some(ref u) = usage {
-                let _ = tx.send(AgentEvent::Usage(u.clone())).await;
+                let total = total_usage.as_ref().map(|t|
+                    TokenUsage::new(
+                        t.input_tokens + u.input_tokens,
+                        t.output_tokens + u.output_tokens,
+                        t.cache_hit_tokens + u.cache_hit_tokens,
+                        t.cache_miss_tokens + u.cache_miss_tokens,
+                    )
+                ).unwrap_or_else(|| u.clone());
+                total_usage = Some(total.clone());
+                let _ = tx.send(AgentEvent::Usage(total)).await;
                 {
                     let db_lock = db.lock().await;
                     let _ = db_lock.save_usage(&session_id, round as u32, u);
