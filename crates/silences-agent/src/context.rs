@@ -152,3 +152,69 @@ pub fn build_warmup_text(
     parts.push(silences_md);
     parts.join("\n\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── session_context_dir ──
+
+    #[test]
+    fn test_session_context_dir_constructs_path() {
+        let root = Path::new("/project");
+        let path = session_context_dir(root, "abc123");
+        assert_eq!(
+            path,
+            Path::new("/project/.silences/sessions/abc123")
+        );
+    }
+
+    #[test]
+    fn test_session_context_dir_trailing_slash_in_root() {
+        let root = Path::new("/project/");
+        let path = session_context_dir(root, "sess_01");
+        assert_eq!(
+            path,
+            Path::new("/project/.silences/sessions/sess_01")
+        );
+    }
+
+    // ── build_warmup_text ──
+
+    #[test]
+    fn test_build_warmup_text_all_parts() {
+        let result = build_warmup_text("history", "user msg", "silences");
+        assert_eq!(result, "history\n\nuser msg\n\nsilences");
+    }
+
+    #[test]
+    fn test_build_warmup_text_empty_history() {
+        let result = build_warmup_text("", "user msg", "silences");
+        assert_eq!(result, "user msg\n\nsilences");
+    }
+
+    #[test]
+    fn test_build_warmup_text_only_user_and_silences() {
+        let result = build_warmup_text("", "hello", "## Project Info");
+        assert_eq!(result, "hello\n\n## Project Info");
+    }
+
+    #[test]
+    fn test_build_warmup_text_empty_silences() {
+        let result = build_warmup_text("history", "msg", "");
+        assert_eq!(result, "history\n\nmsg\n\n");
+    }
+
+    // ── load_project_context ──
+
+    #[test]
+    fn test_load_project_context_paths() {
+        let ctx = load_project_context(Some(Path::new("/project")), Some("sess_01"));
+        assert_eq!(ctx.root, Path::new("/project"));
+        assert_eq!(ctx.session_dir, Path::new("/project/.silences/sessions/sess_01"));
+        // Files don't exist, so both should be None
+        assert!(ctx.silences_md.is_none());
+        assert!(ctx.context_delta.is_none());
+    }
+}

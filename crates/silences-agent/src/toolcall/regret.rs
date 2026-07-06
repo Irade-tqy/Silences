@@ -70,3 +70,59 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_history_empty() {
+        let mut history = ToolHistory::new(5);
+        assert!(!history.can_undo());
+        assert!(history.undo().is_err());
+    }
+
+    #[test]
+    fn test_push_and_undo_lifo() {
+        let mut history = ToolHistory::new(10);
+        history.push("read", InverseOp::new("undo read".into(), || Ok("done".into())));
+        history.push("edit", InverseOp::new("undo edit".into(), || Ok("done".into())));
+
+        assert!(history.can_undo());
+        assert_eq!(history.undo().unwrap(), "[UNDO] edit: done");
+        assert_eq!(history.undo().unwrap(), "[UNDO] read: done");
+        assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn test_push_respects_max_size() {
+        let mut history = ToolHistory::new(2);
+        history.push("a", InverseOp::new("a".into(), || Ok("a_out".into())));
+        history.push("b", InverseOp::new("b".into(), || Ok("b_out".into())));
+        history.push("c", InverseOp::new("c".into(), || Ok("c_out".into())));
+
+        // "a" was evicted when "c" was pushed
+        assert_eq!(history.undo().unwrap(), "[UNDO] c: c_out");
+        assert_eq!(history.undo().unwrap(), "[UNDO] b: b_out");
+        assert!(history.undo().is_err());
+    }
+
+    #[test]
+    fn test_can_undo_reflects_state() {
+        let mut history = ToolHistory::new(3);
+        assert!(!history.can_undo());
+
+        history.push("x", InverseOp::new("x".into(), || Ok("".into())));
+        assert!(history.can_undo());
+
+        history.undo().unwrap();
+        assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn test_undo_on_empty_error_message() {
+        let mut history = ToolHistory::new(3);
+        let err = history.undo().unwrap_err();
+        assert!(err.to_string().contains("没有可撤销的操作"));
+    }
+}

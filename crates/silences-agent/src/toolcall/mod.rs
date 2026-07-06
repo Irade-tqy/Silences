@@ -376,3 +376,195 @@ pub async fn execute_tool(
     })?;
     (tool.handler)(args).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_tool(name: &'static str) -> ToolDef {
+        ToolDef {
+            name,
+            description: "test tool",
+            schema: serde_json::json!({"type": "object", "properties": {}}),
+            handler: Box::new(|_| Box::pin(async { Ok(ToolOutcome::new("ok")) })),
+        }
+    }
+
+    // ── ToolOutcome ──
+
+    #[test]
+    fn test_tool_outcome_new() {
+        let outcome = ToolOutcome::new("hello");
+        assert_eq!(outcome.summary, "hello");
+        assert!(outcome.inverse.is_none());
+        assert!(!outcome.rollback);
+        assert!(outcome.approval_pending.is_none());
+        assert!(outcome.inject_messages.is_empty());
+        assert!(!outcome.defer_rollback);
+    }
+
+    // ── InverseOp ──
+
+    #[test]
+    fn test_inverse_op_new_and_apply() {
+        let op = InverseOp::new("test undo".into(), || Ok("result".into()));
+        assert_eq!(op.description, "test undo");
+        assert_eq!(op.apply().unwrap(), "result");
+    }
+
+    #[test]
+    fn test_inverse_op_apply_error() {
+        let op = InverseOp::new("failing".into(), || {
+            Err(anyhow::anyhow!("something went wrong"))
+        });
+        let err = op.apply().unwrap_err();
+        assert!(err.to_string().contains("something went wrong"));
+    }
+
+    // ── is_tabsensitive ──
+
+    #[test]
+    fn test_is_tabsensitive_makefile() {
+        assert!(is_tabsensitive("Makefile"));
+        assert!(is_tabsensitive("makefile"));
+        assert!(is_tabsensitive("GNUmakefile"));
+        assert!(is_tabsensitive("gnumakefile"));
+    }
+
+    #[test]
+    fn test_is_tabsensitive_dockerfile() {
+        assert!(is_tabsensitive("Dockerfile"));
+        assert!(is_tabsensitive("dockerfile"));
+    }
+
+    #[test]
+    fn test_is_tabsensitive_dot_mk() {
+        assert!(is_tabsensitive("build.mk"));
+        assert!(is_tabsensitive("rules.mk"));
+    }
+
+    #[test]
+    fn test_is_tabsensitive_negative() {
+        assert!(!is_tabsensitive("main.rs"));
+        assert!(!is_tabsensitive("README.md"));
+        assert!(!is_tabsensitive("Cargo.toml"));
+    }
+
+    // ── normalize ──
+
+    #[test]
+    fn test_normalize_crlf_to_lf() {
+        assert_eq!(normalize("a\r\nb\r\nc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_normalize_tabs_to_spaces() {
+        assert_eq!(normalize("\tHello"), "    Hello");
+        assert_eq!(normalize("\t\tIndented"), "        Indented");
+    }
+
+    #[test]
+    fn test_normalize_mixed() {
+        assert_eq!(
+            normalize("\tfoo\r\n\t\tbar\r\nbaz"),
+            "    foo\n        bar\nbaz"
+        );
+    }
+
+    #[test]
+    fn test_normalize_no_tabs_no_crlf() {
+        assert_eq!(normalize("hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn test_normalize_empty() {
+        assert_eq!(normalize(""), "");
+    }
+
+    // ── build_api_tools ──
+
+    #[test]
+    fn test_build_api_tools_names() {
+        let tools = vec![dummy_tool("read"), dummy_tool("edit"), dummy_tool("grep")];
+        let api = build_api_tools(&tools);
+
+        assert_eq!(api.len(), 3);
+        assert_eq!(api[0]["function"]["name"], "read");
+        assert_eq!(api[1]["function"]["name"], "edit");
+        assert_eq!(api[2]["function"]["name"], "grep");
+    }
+
+    #[test]
+    fn test_build_api_tools_structure() {
+        let tools = vec![dummy_tool("test")];
+        let api = build_api_tools(&tools);
+
+        assert_eq!(api[0]["type"], "function");
+        assert_eq!(api[0]["function"]["strict"], true);
+        assert_eq!(api[0]["function"]["description"], "test tool");
+        assert!(api[0]["function"]["parameters"].is_object());
+    }
+
+    #[test]
+    fn test_build_api_tools_empty() {
+        let api = build_api_tools(&[]);
+        assert!(api.is_empty());
+    }
+
+    // ── auto_truncate ──
+
+    #[test]
+    fn test_auto_truncate_under_threshold() {
+        let content = "short text";
+        let (result, truncated) = auto_truncate(content, 100, 10, 10);
+        assert!(!truncated);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_auto_truncate_over_threshold() {
+        // Content large enough to exceed any tokenizer's threshold (5 tok)
+        let content = "hello world this is a test of the truncation function! ".repeat(20);
+        let (result, truncated) = auto_truncate(&content, 5, 3, 2);
+        assert!(truncated);
+        assert!(result.contains("[截断"));
+    }
+
+    #[test]
+    fn test_auto_truncate_truncated_contains_header_and_footer() {
+        let content = "hello world this is a test of the truncation function! ".repeat(20);
+        let (result, truncated) = auto_truncate(&content, 3, 1, 1);
+        assert!(truncated);
+        // Truncated output starts with the beginning of the content
+        assert!(result.starts_with("hello"));
+        assert!(result.contains("[截断"));
+    }
+
+    // ── truncate_head_tok ──
+
+    #[test]
+    fn test_truncate_head_tok_under_limit() {
+        let content = "hello world";
+        let (result, truncated) = truncate_head_tok(content, 100);
+        assert!(!truncated);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_truncate_head_tok_over_limit() {
+        let content = "hello world this is a very long string that should definitely exceed any reasonable token limit for this test! ".repeat(20);
+        let (result, truncated) = truncate_head_tok(&content, 3);
+        assert!(truncated);
+        assert!(result.len() < content.len());
+        assert!(content.starts_with(&result));
+    }
+
+    #[test]
+    fn test_truncate_head_tok_exact_limit() {
+        // Very short content that won't exceed any tokenizer threshold
+        let content = "a";
+        let (result, truncated) = truncate_head_tok(content, 3);
+        assert!(!truncated);
+        assert_eq!(result, content);
+    }
+}

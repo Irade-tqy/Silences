@@ -134,3 +134,137 @@ impl TaskQueue {
         parts.join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_queue_empty() {
+        let queue = TaskQueue::new();
+        assert!(queue.is_empty());
+        assert!(queue.list().is_empty());
+    }
+
+    #[test]
+    fn test_add_and_list() {
+        let queue = TaskQueue::new();
+        queue.add("t1".into(), "Task 1".into());
+        queue.add("t2".into(), "Task 2".into());
+
+        let tasks = queue.list();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, "t1");
+        assert_eq!(tasks[1].id, "t2");
+    }
+
+    #[test]
+    fn test_pop_front_fifo() {
+        let queue = TaskQueue::new();
+        queue.add("a".into(), "A".into());
+        queue.add("b".into(), "B".into());
+        queue.add("c".into(), "C".into());
+
+        assert_eq!(queue.pop_front().unwrap().id, "a");
+        assert_eq!(queue.pop_front().unwrap().id, "b");
+        assert_eq!(queue.pop_front().unwrap().id, "c");
+        assert!(queue.pop_front().is_none());
+    }
+
+    #[test]
+    fn test_remove_by_id() {
+        let queue = TaskQueue::new();
+        queue.add("keep".into(), "Keep".into());
+        queue.add("remove_me".into(), "Remove".into());
+
+        let removed = queue.remove("remove_me");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "remove_me");
+
+        let tasks = queue.list();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "keep");
+    }
+
+    #[test]
+    fn test_remove_non_existent() {
+        let queue = TaskQueue::new();
+        queue.add("t1".into(), "T1".into());
+        assert!(queue.remove("non_existent").is_none());
+        assert_eq!(queue.list().len(), 1);
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let queue = TaskQueue::new();
+        assert!(queue.is_empty());
+
+        queue.add("t".into(), "T".into());
+        assert!(!queue.is_empty());
+
+        queue.pop_front();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_complete_task() {
+        let queue = TaskQueue::new();
+        queue.add("a".into(), "A".into());
+        queue.add("b".into(), "B".into());
+
+        queue.set_active("a", "A");
+        queue.complete_task("a");
+
+        assert!(queue.completed_list().len() == 1);
+        assert_eq!(queue.completed_list()[0].id, "a");
+        assert_eq!(queue.list().len(), 1);
+        assert_eq!(queue.list()[0].id, "b");
+    }
+
+    #[test]
+    fn test_has_active() {
+        let queue = TaskQueue::new();
+        assert!(!queue.has_active());
+
+        queue.set_active("t", "T");
+        assert!(queue.has_active());
+
+        queue.clear_active();
+        assert!(!queue.has_active());
+    }
+
+    #[test]
+    fn test_format_for_context_completed_and_pending() {
+        let queue = TaskQueue::new();
+        queue.add("t1".into(), "Task 1".into());
+        queue.add("t2".into(), "Task 2".into());
+        queue.complete_task("t1");
+
+        let formatted = queue.format_for_context();
+        assert!(formatted.contains("### 已完成"));
+        assert!(formatted.contains("### 待处理"));
+        assert!(formatted.contains("- t1: Task 1"));
+        assert!(formatted.contains("- t2: Task 2"));
+    }
+
+    #[test]
+    fn test_format_for_context_empty() {
+        let queue = TaskQueue::new();
+        let formatted = queue.format_for_context();
+        assert_eq!(formatted, "_暂无任务_");
+    }
+
+    #[test]
+    fn test_completed_list_order() {
+        let queue = TaskQueue::new();
+        queue.add("a".into(), "A".into());
+        queue.add("b".into(), "B".into());
+        queue.complete_task("a");
+        queue.complete_task("b");
+
+        let completed = queue.completed_list();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0].id, "a");
+        assert_eq!(completed[1].id, "b");
+    }
+}
