@@ -544,3 +544,200 @@ fn mask_api_key(key: &Option<String>) -> Option<String> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+    use silences_core::{ToolCallFunction, ToolCallValue};
+
+    // ── mask_api_key ──
+
+    #[test]
+    fn test_mask_api_key_long() {
+        let key = Some("sk-ant-1234567890abc".to_string());
+        assert_eq!(mask_api_key(&key), Some("sk-a...0abc".to_string()));
+    }
+
+    #[test]
+    fn test_mask_api_key_short() {
+        let key = Some("short".to_string());
+        assert_eq!(mask_api_key(&key), Some("****".to_string()));
+    }
+
+    #[test]
+    fn test_mask_api_key_none() {
+        assert_eq!(mask_api_key(&None), None);
+    }
+
+    #[test]
+    fn test_mask_api_key_exactly_eight() {
+        let key = Some("12345678".to_string());
+        assert_eq!(mask_api_key(&key), Some("****".to_string()));
+    }
+
+    // ── enrich_tool_names ──
+
+    #[test]
+    fn test_enrich_tool_names_basic() {
+        let mut msgs = vec![
+            Message::new_tool_call(vec![ToolCallValue {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "search".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            Message::new_tool_result("call_1", "some result"),
+        ];
+        enrich_tool_names(&mut msgs);
+        assert_eq!(msgs[1].name.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn test_enrich_tool_names_noop() {
+        let mut msgs = vec![
+            Message::new("user", "hello"),
+            Message::new("assistant", "hi there"),
+        ];
+        enrich_tool_names(&mut msgs);
+        assert!(msgs[0].name.is_none());
+        assert!(msgs[1].name.is_none());
+    }
+
+    #[test]
+    fn test_enrich_tool_names_missing_id() {
+        let mut msgs = vec![
+            Message::new_tool_call(vec![ToolCallValue {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "search".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            Message::new_tool_result("call_2", "result"),
+        ];
+        enrich_tool_names(&mut msgs);
+        // No matching tool_call_id → name stays None
+        assert!(msgs[1].name.is_none());
+    }
+
+    #[test]
+    fn test_enrich_tool_names_empty() {
+        let mut msgs: Vec<Message> = vec![];
+        // Should not panic
+        enrich_tool_names(&mut msgs);
+    }
+
+    #[test]
+    fn test_enrich_tool_names_multiple() {
+        let mut msgs = vec![
+            Message::new_tool_call(vec![
+                ToolCallValue {
+                    id: "c1".into(),
+                    call_type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "search".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+                ToolCallValue {
+                    id: "c2".into(),
+                    call_type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+            ]),
+            Message::new_tool_result("c1", "result1"),
+            Message::new_tool_result("c2", "result2"),
+        ];
+        enrich_tool_names(&mut msgs);
+        assert_eq!(msgs[1].name.as_deref(), Some("search"));
+        assert_eq!(msgs[2].name.as_deref(), Some("read"));
+    }
+
+    #[test]
+    fn test_enrich_tool_names_interleaved() {
+        let mut msgs = vec![
+            Message::new_tool_call(vec![ToolCallValue {
+                id: "c1".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "search".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            Message::new_tool_result("c1", "result"),
+            Message::new("assistant", "based on search..."),
+            Message::new_tool_call(vec![ToolCallValue {
+                id: "c2".into(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            Message::new_tool_result("c2", "content"),
+        ];
+        enrich_tool_names(&mut msgs);
+        assert_eq!(msgs[1].name.as_deref(), Some("search"));
+        assert_eq!(msgs[4].name.as_deref(), Some("read_file"));
+    }
+
+    // ── agent_to_sse ──
+
+    #[tokio::test]
+    async fn test_agent_to_sse_events() {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tx.send(AgentEvent::Text("hello".into())).await.unwrap();
+        tx.send(AgentEvent::Session("sess_1".into())).await.unwrap();
+        tx.send(AgentEvent::Reasoning("thinking...".into())).await.unwrap();
+        tx.send(AgentEvent::ToolCall {
+            id: "call_1".into(),
+            name: "search".into(),
+            args: "{}".into(),
+            result: Some("results".into()),
+        })
+        .await
+        .unwrap();
+        tx.send(AgentEvent::MessageBoundary).await.unwrap();
+        drop(tx); // close channel so stream ends
+
+        let stream = agent_to_sse(ReceiverStream::new(rx), "sess_1".into(), false);
+        let response = Sse::new(stream).into_response();
+        let bytes = to_bytes(response.into_body(), 10000).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+
+        // SSE wire format: "data: <json>\n\n"
+        let parts: Vec<&str> = body.split("\n\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(parts.len(), 5, "expected 5 SSE events, got {}: {body:?}", parts.len());
+
+        let prefix = "data: ";
+        let events: Vec<SseEvent> = parts
+            .iter()
+            .map(|p| {
+                let trimmed = p.trim();
+                assert!(
+                    trimmed.starts_with(prefix),
+                    "expected 'data: ' prefix, got: {trimmed:?}"
+                );
+                let json = &trimmed[prefix.len()..];
+                serde_json::from_str(json).expect("failed to parse SseEvent JSON")
+            })
+            .collect();
+
+        assert!(matches!(&events[0], SseEvent::Text { content } if content == "hello"));
+        assert!(matches!(&events[1], SseEvent::Session { id } if id == "sess_1"));
+        assert!(matches!(&events[2], SseEvent::Reasoning { content } if content == "thinking..."));
+        assert!(matches!(
+            &events[3],
+            SseEvent::ToolCall { id, name, .. } if id == "call_1" && name == "search"
+        ));
+        assert!(matches!(&events[4], SseEvent::MessageBoundary));
+    }
+}

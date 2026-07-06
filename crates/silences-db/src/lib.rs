@@ -342,6 +342,9 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use silences_core::ToolCallFunction;
+
+    // ── Session CRUD ──
 
     #[test]
     fn test_create_session() {
@@ -349,6 +352,95 @@ mod tests {
         let id = db.create_session().unwrap();
         assert!(!id.is_empty());
     }
+
+    #[test]
+    fn test_rename_session() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.rename_session(&sid, "我的会话").unwrap();
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions[0].name.as_deref(), Some("我的会话"));
+    }
+
+    #[test]
+    fn test_rename_session_empty_name() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        // First give it a name, then clear it
+        db.rename_session(&sid, "temporary").unwrap();
+        db.rename_session(&sid, "").unwrap();
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions[0].name.as_deref(), None, "empty name should become None");
+    }
+
+    #[test]
+    fn test_rename_nonexistent_session() {
+        let db = Db::open_in_memory().unwrap();
+        // Renaming a non-existent session is a no-op (UPDATE affects 0 rows)
+        let result = db.rename_session("nonexistent-id", "新名字");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_delete_session() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        // Add a message and usage so we can verify they are cleaned up
+        db.save_message(&sid, &Message::new("user", "你好")).unwrap();
+        db.save_usage(&sid, 1, &TokenUsage::new(100, 50, 10, 20)).unwrap();
+        assert_eq!(db.get_messages(&sid).unwrap().len(), 1);
+        assert!(db.get_total_usage(&sid).unwrap().is_some());
+
+        db.delete_session(&sid).unwrap();
+
+        // Verify cascade: messages gone, usage gone, session gone
+        assert!(db.get_messages(&sid).unwrap().is_empty(), "messages should be empty after session delete");
+        assert!(db.get_total_usage(&sid).unwrap().is_none(), "usage should be None after session delete");
+        let sessions = db.list_sessions().unwrap();
+        assert!(sessions.iter().all(|s| s.id != sid), "deleted session should not appear in list");
+    }
+
+    #[test]
+    fn test_delete_deleted_session() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.delete_session(&sid).unwrap();
+        // Deleting an already-deleted session should be idempotent
+        let result = db.delete_session(&sid);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_sessions_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let sessions = db.list_sessions().unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_list_sessions_one() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, sid);
+        assert_eq!(sessions[0].name, None);
+        assert_eq!(sessions[0].preview, None);
+    }
+
+    #[test]
+    fn test_list_sessions_multiple_ordered() {
+        let db = Db::open_in_memory().unwrap();
+        let sid1 = db.create_session().unwrap();
+        let sid2 = db.create_session().unwrap();
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        // Most recently created session should be first (ORDER BY created_at DESC)
+        assert_eq!(sessions[0].id, sid2);
+        assert_eq!(sessions[1].id, sid1);
+    }
+
+    // ── Messages ──
 
     #[test]
     fn test_save_and_get_messages() {
@@ -365,6 +457,212 @@ mod tests {
     }
 
     #[test]
+    fn test_save_message_with_name() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        let msg = Message::new_user("orch", "系统指令");
+        db.save_message(&sid, &msg).unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].name.as_deref(), Some("orch"));
+    }
+
+    #[test]
+    fn test_save_message_with_tool_calls() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        let tool_call = ToolCallValue {
+            id: "call_1".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "get_weather".into(),
+                arguments: r#"{"city":"北京"}"#.into(),
+            },
+        };
+        let msg = Message::new_tool_call(vec![tool_call]);
+        db.save_message(&sid, &msg).unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 1);
+        let saved_tc = msgs[0].tool_calls.as_ref().unwrap();
+        assert_eq!(saved_tc.len(), 1);
+        assert_eq!(saved_tc[0].id, "call_1");
+        assert_eq!(saved_tc[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_save_message_with_tool_call_id() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        let msg = Message::new_tool_result("call_1", "北京今天25度");
+        db.save_message(&sid, &msg).unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(msgs[0].role, "tool");
+        assert_eq!(msgs[0].content, "北京今天25度");
+    }
+
+    #[test]
+    fn test_hidden_message_not_returned() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_message(&sid, &Message::new("user", "你好")).unwrap();
+        // Hide all messages in this session (id 1 > 0)
+        db.hide_messages_after(&sid, 0).unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert!(msgs.is_empty(), "hidden messages should not be returned by get_messages");
+    }
+
+    #[test]
+    fn test_multiple_messages_preserve_order() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_message(&sid, &Message::new("user", "first")).unwrap();
+        db.save_message(&sid, &Message::new("assistant", "second")).unwrap();
+        db.save_message(&sid, &Message::new("user", "third")).unwrap();
+        db.save_message(&sid, &Message::new("assistant", "fourth")).unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].content, "first");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].content, "second");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[2].content, "third");
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[3].content, "fourth");
+        assert_eq!(msgs[3].role, "assistant");
+    }
+
+    #[test]
+    fn test_get_messages_different_roles() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_message(&sid, &Message::new("system", "You are a helpful assistant")).unwrap();
+        db.save_message(&sid, &Message::new("user", "hello")).unwrap();
+        db.save_message(&sid, &Message::new("assistant", "hi")).unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[2].role, "assistant");
+    }
+
+    #[test]
+    fn test_get_messages_nonexistent_session() {
+        let db = Db::open_in_memory().unwrap();
+        let msgs = db.get_messages("nonexistent").unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn test_delete_messages_by_name() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_message(&sid, &Message::new_user("orch", "指令1")).unwrap();
+        db.save_message(&sid, &Message::new("user", "普通消息")).unwrap();
+        db.save_message(&sid, &Message::new_user("orch", "指令2")).unwrap();
+        assert_eq!(db.get_messages(&sid).unwrap().len(), 3);
+
+        db.delete_messages_by_name(&sid, "orch").unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "普通消息");
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn test_delete_messages_by_name_no_match() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_message(&sid, &Message::new("user", "hello")).unwrap();
+        // Deleting with a non-matching name should be a no-op
+        db.delete_messages_by_name(&sid, "orch").unwrap();
+        let msgs = db.get_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 1, "non-matching delete should be no-op");
+        assert_eq!(msgs[0].content, "hello");
+    }
+
+    // ── Settings ──
+
+    #[test]
+    fn test_set_get_setting() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting("theme", "dark").unwrap();
+        let val = db.get_setting("theme").unwrap();
+        assert_eq!(val.as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn test_get_nonexistent_setting() {
+        let db = Db::open_in_memory().unwrap();
+        let val = db.get_setting("nonexistent_key").unwrap();
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn test_update_setting() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting("theme", "dark").unwrap();
+        db.set_setting("theme", "light").unwrap();
+        let val = db.get_setting("theme").unwrap();
+        assert_eq!(val.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn test_set_setting_empty_string() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting("key", "").unwrap();
+        let val = db.get_setting("key").unwrap();
+        assert_eq!(val, Some(String::new()));
+    }
+
+    #[test]
+    fn test_delete_setting() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting("theme", "dark").unwrap();
+        db.delete_setting("theme").unwrap();
+        let val = db.get_setting("theme").unwrap();
+        assert_eq!(val, None);
+    }
+
+    // ── Context Snapshots ──
+
+    #[test]
+    fn test_save_get_context_snapshot() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        let messages = vec![
+            Message::new("system", "You are helpful"),
+            Message::new("user", "你好"),
+        ];
+        db.save_context_snapshot(&sid, &messages).unwrap();
+        let restored = db.get_context_snapshot(&sid).unwrap().unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].content, "You are helpful");
+        assert_eq!(restored[1].content, "你好");
+    }
+
+    #[test]
+    fn test_overwrite_context_snapshot() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_context_snapshot(&sid, &[Message::new("user", "第一版")]).unwrap();
+        db.save_context_snapshot(&sid, &[Message::new("user", "第二版")]).unwrap();
+        let restored = db.get_context_snapshot(&sid).unwrap().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].content, "第二版");
+    }
+
+    #[test]
+    fn test_get_nonexistent_context_snapshot() {
+        let db = Db::open_in_memory().unwrap();
+        let result = db.get_context_snapshot("nonexistent-session").unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── Token Usage ──
+
+    #[test]
     fn test_save_and_get_usage() {
         let db = Db::open_in_memory().unwrap();
         let sid = db.create_session().unwrap();
@@ -373,5 +671,26 @@ mod tests {
         let total = db.get_total_usage(&sid).unwrap().unwrap();
         assert_eq!(total.input_tokens, 1000);
         assert_eq!(total.cost_yuan, usage.cost_yuan);
+    }
+
+    #[test]
+    fn test_get_total_usage_nonexistent_session() {
+        let db = Db::open_in_memory().unwrap();
+        let usage = db.get_total_usage("nonexistent").unwrap();
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn test_save_usage_multiple_rounds() {
+        let db = Db::open_in_memory().unwrap();
+        let sid = db.create_session().unwrap();
+        db.save_usage(&sid, 1, &TokenUsage::new(100, 10, 50, 50)).unwrap();
+        db.save_usage(&sid, 2, &TokenUsage::new(200, 20, 100, 100)).unwrap();
+        db.save_usage(&sid, 3, &TokenUsage::new(300, 30, 150, 150)).unwrap();
+        let total = db.get_total_usage(&sid).unwrap().unwrap();
+        assert_eq!(total.input_tokens, 600);
+        assert_eq!(total.output_tokens, 60);
+        assert_eq!(total.cache_hit_tokens, 300);
+        assert_eq!(total.cache_miss_tokens, 300);
     }
 }
