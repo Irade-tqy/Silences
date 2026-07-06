@@ -89,7 +89,11 @@ impl TaskQueue {
 
     /// 标记任务已完成：从待处理移到已完成列表末尾，清除活跃状态
     pub fn complete_task(&self, id: &str) {
-        let item = self.remove(id);
+        // start_task 已从 tasks 中移除，但设了 active
+        // 先尝试从 tasks 中移除，若不在则从 active 取
+        let item = self.remove(id).or_else(|| {
+            self.active.lock().unwrap().take()
+        });
         if let Some(item) = item {
             *self.active.lock().unwrap() = None;
             let mut completed = self.completed.lock().unwrap();
