@@ -33,3 +33,7 @@
 - 禁止设置 max_rounds, max_tokens, 推理 timeout
 - 禁止 tool 描述放在系统提示词里
 - 除了系统提示词以外，其他禁止 role: system，即使看起来像系统提示
+
+## 项目位置
+
+项目的 Silences 数据可以在 {SilencesDataDirectory} 下找到，即 SILENCES.md, CONTEXT.md, .trash 文件夹, console 文件夹等。
