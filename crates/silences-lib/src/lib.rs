@@ -31,11 +31,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use silences_agent::agent::{run_agent_blocking, prepare_agent_context};
+use silences_agent::agent::{run_agent_blocking, prepare_agent_context, wrap_auto_task};
 use silences_agent::toolcall::{self, ReadTracker};
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::queue::TaskQueue;
-use silences_core::{Message, TokenUsage, ToolLimits, ToolCallValue, ToolCallFunction};
+use silences_core::{Message, TokenUsage, ToolLimits};
 use silences_db::Db;
 use silences_llm::LlmClient;
 use tokio::sync::Mutex;
@@ -153,52 +153,7 @@ impl Silences {
         );
 
         // ── 自动任务包装：无活跃任务时，把用户消息自动包装为 task ──
-        if !self.task_queue.has_active() {
-            let msg_preview: String = message.chars().take(10).collect();
-            let task_id = format!("处理用户消息：{}", msg_preview);
-            let description = message;
-            let add_tc_id = "call_add".to_string();
-            let start_tc_id = "call_start".to_string();
-
-            // 合成 assistant tool_call 消息（add_task + start_task 并行）
-            let asst_msg = Message::new_tool_call(vec![
-                ToolCallValue {
-                    id: add_tc_id.clone(),
-                    call_type: "function".into(),
-                    function: ToolCallFunction {
-                        name: "add_task".into(),
-                        arguments: serde_json::json!({"id": task_id, "description": description}).to_string(),
-                    },
-                },
-                ToolCallValue {
-                    id: start_tc_id.clone(),
-                    call_type: "function".into(),
-                    function: ToolCallFunction {
-                        name: "start_task".into(),
-                        arguments: serde_json::json!({"task_id": task_id, "description": description}).to_string(),
-                    },
-                },
-            ]);
-            prep.messages.push(asst_msg);
-
-            // 执行 add_task
-            if let Ok(outcome) = toolcall::execute_tool(
-                &tools, "add_task",
-                serde_json::json!({"id": task_id, "description": description}),
-            ).await {
-                prep.messages.push(Message::new_tool_result(&add_tc_id, &outcome.summary));
-            }
-
-            // 执行 start_task
-            if let Ok(outcome) = toolcall::execute_tool(
-                &tools, "start_task",
-                serde_json::json!({"task_id": task_id, "description": description}),
-            ).await {
-                prep.messages.push(Message::new_tool_result(&start_tc_id, &outcome.summary));
-            }
-
-            eprintln!("[silences-lib] 自动包装为任务: {task_id}");
-        }
+        wrap_auto_task(&tools, &self.task_queue, &mut prep.messages, message).await;
 
         // 3. 阻塞式运行 agent
         let output = run_agent_blocking(

@@ -41,7 +41,8 @@ export default function Page() {
   const apiBase = useMemo(() => {
     const host = process.env.NEXT_PUBLIC_API_HOST ||
       (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
-    return `http://${host}:1030`;
+    const port = process.env.NEXT_PUBLIC_API_PORT || '1030';
+    return `http://${host}:${port}`;
   }, []);
 
   const scrollToBottom = useCallback(() => {

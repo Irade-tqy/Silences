@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import MarkdownIt from 'markdown-it';
 
 const md = new MarkdownIt({
@@ -31,7 +32,9 @@ interface MarkdownProps {
  * - 外部链接在新标签页打开
  * - 样式由全局 CSS 控制 (.assistant-content / .think-content)
  */
-export default function Markdown({ children }: MarkdownProps) {
+function Markdown({ children }: MarkdownProps) {
   const html = md.render(children);
   return <div className="md-html" dangerouslySetInnerHTML={{ __html: html }} />;
 }
+
+export default memo(Markdown);

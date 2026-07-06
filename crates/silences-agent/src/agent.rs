@@ -198,11 +198,9 @@ pub fn run_agent(
                 }
                 return;
             }
-            let api_tools = toolcall::build_api_tools(&tools);
-
             // 调用 LLM（流式）
             let mut stream = match llm
-                .chat_stream(&messages, system.as_deref(), Some(api_tools))
+                .chat_stream(&messages, system.as_deref(), Some(api_tools.clone()))
                 .await
             {
                 Ok(s) => s,
@@ -287,26 +285,12 @@ pub fn run_agent(
                         let db_lock = db.lock().await;
                         let _ = db_lock.save_message(&session_id, &final_asst);
                     }
-                    messages.push(final_asst); // 纳入内存，供退出快照捕获
+                    messages.push(final_asst);
+                    messages_changed = true;
                 }
 
                 // 保存用量（发送累计值）
-                if let Some(ref u) = usage {
-                    let total = total_usage.as_ref().map(|t|
-                        TokenUsage::new(
-                            t.input_tokens + u.input_tokens,
-                            t.output_tokens + u.output_tokens,
-                            t.cache_hit_tokens + u.cache_hit_tokens,
-                            t.cache_miss_tokens + u.cache_miss_tokens,
-                        )
-                    ).unwrap_or_else(|| u.clone());
-                    total_usage = Some(total.clone());
-                    let _ = tx.send(AgentEvent::Usage(total)).await;
-                    {
-                        let db_lock = db.lock().await;
-                        let _ = db_lock.save_usage(&session_id, round as u32, u);
-                    }
-                }
+                accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round).await;
 
                 // 检查是否有待处理的延迟回退（end_task → u_orch → 模型更新 CONTEXT.md 后 stop）
                 if pending_rollback {
@@ -320,6 +304,7 @@ pub fn run_agent(
 
                     if checkpoint < messages.len() {
                         messages.truncate(checkpoint);
+                        messages_changed = true;
 
                         // 隐藏本轮产生的工具消息，保留 last_preserved_id 之前的消息
                         let db_lock = db.lock().await;
@@ -337,6 +322,7 @@ pub fn run_agent(
                             };
                             let _ = db_lock.save_message(&session_id, &msg);
                             messages.push(msg);
+                            messages_changed = true;
                         }
                         checkpoint = messages.len(); // 摘要进入稳定区，下次截断保留
 
@@ -354,8 +340,10 @@ pub fn run_agent(
                                 let ctx_name = session_dir.join("CONTEXT.md").to_string_lossy().to_string();
                                 if let Some(pos) = messages.iter().rposition(|m| m.name.as_deref() == Some(&ctx_name)) {
                                     messages[pos].content = fresh.clone();
+                                    messages_changed = true;
                                 } else {
                                     messages.push(Message::new_user(&ctx_name, &fresh));
+                                    messages_changed = true;
                                 }
                                 // 删旧写新：DB 只保留一份 CONTEXT.md
                                 let _ = db_lock.delete_messages_by_name(&session_id, &ctx_name);
@@ -369,8 +357,10 @@ pub fn run_agent(
                             let task_list_content = queue.format_for_context();
                             if let Some(pos) = messages.iter().rposition(|m| m.name.as_deref() == Some(&task_list_name)) {
                                 messages[pos].content = task_list_content.clone();
+                                messages_changed = true;
                             } else {
                                 messages.push(Message::new_user(&task_list_name, &task_list_content));
+                                messages_changed = true;
                             }
                             let _ = db_lock.delete_messages_by_name(&session_id, &task_list_name);
                             let _ = db_lock.save_message(&session_id, &Message::new_user(&task_list_name, &task_list_content));
@@ -387,14 +377,16 @@ pub fn run_agent(
                     }
                     continue;
                 }
-                // 正常退出前最后一次快照
-                {
-                    let mut map = agent_contexts.lock().await;
-                    map.insert(session_id.clone(), messages.clone());
-                }
-                {
-                    let db_lock = db.lock().await;
-                    let _ = db_lock.save_context_snapshot(&session_id, &messages);
+                // 正常退出前最后一次快照（仅在 messages 有变化时写入）
+                if messages_changed {
+                    {
+                        let mut map = agent_contexts.lock().await;
+                        map.insert(session_id.clone(), messages.clone());
+                    }
+                    {
+                        let db_lock = db.lock().await;
+                        let _ = db_lock.save_context_snapshot(&session_id, &messages);
+                    }
                 }
                 // agent 正常退出，清理 active_runs 中的停止标志
                 {
@@ -429,24 +421,10 @@ pub fn run_agent(
                 let _ = db_lock.save_message(&session_id, &asst_msg);
             }
             messages.push(asst_msg);
+            messages_changed = true;
 
             // 保存本轮 usage（tool call 轮次的 API 用量，发送累计值）
-            if let Some(ref u) = usage {
-                let total = total_usage.as_ref().map(|t|
-                    TokenUsage::new(
-                        t.input_tokens + u.input_tokens,
-                        t.output_tokens + u.output_tokens,
-                        t.cache_hit_tokens + u.cache_hit_tokens,
-                        t.cache_miss_tokens + u.cache_miss_tokens,
-                    )
-                ).unwrap_or_else(|| u.clone());
-                total_usage = Some(total.clone());
-                let _ = tx.send(AgentEvent::Usage(total)).await;
-                {
-                    let db_lock = db.lock().await;
-                    let _ = db_lock.save_usage(&session_id, round as u32, u);
-                }
-            }
+            accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round).await;
 
             // 逐个执行工具
             let mut needs_rollback = false;
@@ -495,6 +473,7 @@ pub fn run_agent(
                             let _ = db_lock.save_message(&session_id, &err_msg);
                         }
                         messages.push(err_msg);
+                        messages_changed = true;
                         continue;
                     }
                 };
@@ -512,6 +491,7 @@ pub fn run_agent(
                         let _ = db_lock.save_message(&session_id, &err_msg);
                     }
                     messages.push(err_msg);
+                    messages_changed = true;
                     break;
                 }
 
@@ -549,6 +529,7 @@ pub fn run_agent(
                             let _ = db_lock.save_message(&session_id, &tool_msg);
                         }
                         messages.push(tool_msg);
+                        messages_changed = true;
 
                         // 注入额外消息（如 end_task 注入 u_orch）
                         for mut inject_msg in outcome.inject_messages {
@@ -564,6 +545,7 @@ pub fn run_agent(
                                 let _ = db_lock.save_message(&session_id, &inject_msg);
                             }
                             messages.push(inject_msg);
+                            messages_changed = true;
                         }
                     }
                     Err(e) => {
@@ -578,6 +560,7 @@ pub fn run_agent(
                             let _ = db_lock.save_message(&session_id, &err_msg);
                         }
                         messages.push(err_msg);
+                        messages_changed = true;
                     }
                 }
             }
@@ -593,6 +576,7 @@ pub fn run_agent(
             let mut did_rollback = false;
             if needs_rollback && checkpoint < messages.len() {
                 messages.truncate(checkpoint);
+                messages_changed = true;
                 // 隐藏 DB 中本轮产生的消息
                 {
                     let db_lock = db.lock().await;
@@ -767,7 +751,7 @@ async fn accumulate_usage(
     session_id: &str,
     round: usize,
 ) {
-    if let Some(ref u) = round_usage {
+    if let Some(u) = round_usage {
         let total = total_usage.as_ref().map(|t|
             TokenUsage::new(
                 t.input_tokens + u.input_tokens,

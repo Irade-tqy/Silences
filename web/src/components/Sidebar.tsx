@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import { Session } from '@/types';
 import { fmtRelative } from '@/utils';
 
@@ -12,7 +13,7 @@ interface SidebarProps {
   onContextMenu: (e: React.MouseEvent, sid: string) => void;
 }
 
-export default function Sidebar({
+function Sidebar({
   sessions, activeId, selectSession, newSession,
   setSettingsOpen, onContextMenu,
 }: SidebarProps) {
@@ -65,3 +66,5 @@ export default function Sidebar({
     </div>
   );
 }
+
+export default memo(Sidebar);

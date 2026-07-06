@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface ViewportInfo {
   width: number;
@@ -23,14 +23,23 @@ function getViewport(): ViewportInfo {
 
 export function useViewport(): ViewportInfo {
   const [vp, setVp] = useState<ViewportInfo>(getViewport);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleResize = useCallback(() => {
-    setVp(getViewport());
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    timeoutRef.current = setTimeout(() => {
+      setVp(getViewport());
+    }, 100);
   }, []);
 
   useEffect(() => {
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
   }, [handleResize]);
 
   return vp;
