@@ -53,7 +53,7 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
     ToolDef {
         name: "regret",
         description:
-            "撤销上一个工具的结果。\nwhy: 操作不符合预期时回退[不可撤销]",
+            "撤销上一个可逆操作（edit / block_edit / replace / write / trash）。\n注意：只读/command/任务管理/regret 自身等不可逆操作不会进队，无法撤销。\nwhy: 操作不符合预期时回退[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {},
