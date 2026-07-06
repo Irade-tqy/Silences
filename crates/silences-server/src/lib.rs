@@ -18,7 +18,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use futures_util::stream::Stream;
-use silences_agent::agent::{run_agent, AgentEvent};
+use silences_agent::agent::{run_agent, AgentEvent, prepare_agent_context};
 use silences_agent::queue::TaskQueue;
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
@@ -156,78 +156,20 @@ async fn handle_chat(
         state.system_prompt.lock().ok().and_then(|sp| sp.clone())
     });
 
-    // 获取或创建会话
-    let is_new_session = req.session_id.as_ref().map_or(true, |s| s.is_empty());
-    let session_id = if !is_new_session {
-        req.session_id.clone().unwrap()
-    } else {
-        let db = state.db.lock().await;
-        let sid = db.create_session().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-        })?;
-        // 新会话初始化上下文文件
-        if let Some(ref root) = state.project_root {
-            let _ = silences_agent::context::init_session_context(root, &sid);
-        }
-        sid
-    };
-
-    // 保存用户消息
-    {
-        let db = state.db.lock().await;
-        let msg = Message::new_user("user", &req.message);
-        db.save_message(&session_id, &msg).map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-        })?;
-    }
-
-    // 加载历史消息
-    let history = {
-        let db = state.db.lock().await;
-        let msgs = db.get_messages(&session_id).map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-        })?;
-        msgs
-    };
-
-    // 读取 SILENCES.md（会话级），CONTEXT.md 由 agent 延迟注入
-    let ctx = silences_agent::context::load_project_context(
+    // 准备上下文（解析 session、保存消息、加载历史 + SILENCES.md）
+    let prep = prepare_agent_context(
+        &state.db,
         state.project_root.as_deref(),
-        Some(&session_id),
-    );
+        req.session_id.clone(),
+        &req.message,
+        system.as_deref(),
+    ).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("prepare: {e}"))
+    })?;
 
-    // 构造 context：SILENCES.md 在最前，然后历史消息
-    let silences_name = ctx.session_dir.join("SILENCES.md").to_string_lossy().to_string();
-    let mut context: Vec<Message> = Vec::new();
-    if let Some(ref silences) = ctx.silences_md {
-        context.push(Message::new_user(&silences_name, silences));
-    }
-    context.extend(history);
-
-    // 日志：本次请求的完整上下文
-    eprintln!("——[REQ]——————————————————————————————");
-    eprintln!("  session={} msgs={} new={} silences={} ctx_delta={}",
-        &session_id[..8.min(session_id.len())],
-        context.len(),
-        is_new_session,
-        ctx.silences_md.is_some(),
-        ctx.context_delta.is_some(),
-    );
-    for (i, msg) in context.iter().enumerate() {
-        let preview: String = msg.content.chars().take(120).collect();
-        let rc = if msg.reasoning_content.is_some() { " +reasoning" } else { "" };
-        let tc = if msg.tool_calls.is_some() { " +tool_calls" } else { "" };
-        let name_tag = msg.name.as_ref().map(|n| format!(" @{n}")).unwrap_or_default();
-        if msg.content.len() > 120 {
-            eprintln!("  [{i}][{}]{name_tag}{rc}{tc} {}...", msg.role, preview);
-        } else {
-            eprintln!("  [{i}][{}]{name_tag}{rc}{tc} {}", msg.role, preview);
-        }
-    }
-    if let Some(sys) = &system {
-        let clipped: String = sys.chars().take(120).collect();
-        eprintln!("  [system] {clipped}...");
-    }
+    let session_id = prep.session_id;
+    let is_new_session = prep.is_new;
+    let mut context = prep.messages;
 
     // 获取或创建此会话的工具历史
     let tool_history = {
@@ -244,7 +186,7 @@ async fn handle_chat(
         tool_history.clone(),
         read_tracker,
         state.task_queue.clone(),
-        Some(ctx.session_dir.clone()),
+        Some(prep.session_dir.clone()),
         Default::default(),
     );
 
@@ -324,7 +266,7 @@ async fn handle_chat(
         tool_history,
         Arc::clone(&state.db),
         session_id.clone(),
-        Some(ctx.session_dir.clone()),
+        Some(prep.session_dir.clone()),
         state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
         warmup_enabled,
         flags,

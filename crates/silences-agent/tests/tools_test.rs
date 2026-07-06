@@ -255,7 +255,7 @@ async fn test_replace_in_file() {
     let path = dir.join("hello.rs").to_string_lossy().to_string();
     let result = call(
         "replace",
-        serde_json::json!({"path": path, "pattern": "hello", "replacement": "world"}),
+        serde_json::json!({"path": path, "pattern": "hello", "replacement": "world", "extensions": ["rs"]}),
     )
     .await
     .unwrap();
@@ -269,7 +269,7 @@ async fn test_replace_no_match() {
     let path = dir.to_string_lossy().to_string();
     let result = call(
         "replace",
-        serde_json::json!({"path": path, "pattern": "ZZZZZ", "replacement": "x"}),
+        serde_json::json!({"path": path, "pattern": "ZZZZZ", "replacement": "x", "extensions": ["rs", "txt"]}),
     )
     .await
     .unwrap();

@@ -1,0 +1,15 @@
+[package]
+name = "silences-lib"
+version = "0.1.0"
+edition = "2024"
+description = "Silences 库模式接口：供 AgentBench 等外部 Rust crate 以阻塞方式调用 Silences Agent"
+
+[dependencies]
+silences-core = { path = "../silences-core" }
+silences-llm = { path = "../silences-llm" }
+silences-db = { path = "../silences-db" }
+silences-agent = { path = "../silences-agent" }
+tokio = { workspace = true, features = ["sync"] }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

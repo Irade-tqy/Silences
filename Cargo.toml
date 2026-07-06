@@ -6,6 +6,7 @@ members = [
     "crates/silences-db",
     "crates/silences-agent",
     "crates/silences-server",
+    "crates/silences-lib",
 ]
 
 [workspace.package]

@@ -1,7 +1,7 @@
 //! Agent 循环：LLM ↔ 工具调度 ↔ 流式输出
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +40,26 @@ pub enum AgentEvent {
     /// agent 已恢复
     Resumed,
     Error(String),
+}
+
+/// Agent 循环结束后的输出（阻塞式 API 用）
+#[derive(Debug, Clone)]
+pub struct AgentOutput {
+    /// 最终的 messages 快照
+    pub messages: Vec<Message>,
+    /// 累计用量
+    pub total_usage: Option<TokenUsage>,
+    /// 最终 assistant 文本回复
+    pub assistant_reply: String,
+}
+
+/// 准备好的会话上下文（由 prepare_agent_context 返回）
+#[derive(Debug, Clone)]
+pub struct PreparedContext {
+    pub session_id: String,
+    pub messages: Vec<Message>,
+    pub session_dir: PathBuf,
+    pub is_new: bool,
 }
 
 /// 累积中的 tool call
@@ -596,4 +616,163 @@ pub fn run_agent(
     });
 
     ReceiverStream::new(rx)
+}
+
+/// 阻塞式运行 agent：发送消息 → 等待完成 → 获取回复
+///
+/// 内部调用 `run_agent()` 但消费完整事件流，组装为 `AgentOutput` 返回。
+/// 不依赖外部 pause/stop 信号，适合 lib 模式（AgengBench 等外部调用方）。
+pub async fn run_agent_blocking(
+    llm: LlmClient,
+    tools: Vec<ToolDef>,
+    messages: Vec<Message>,
+    system: Option<String>,
+    tool_history: Arc<Mutex<ToolHistory>>,
+    db: Arc<Mutex<Db>>,
+    session_id: String,
+    session_dir: Option<PathBuf>,
+    tool_delay_ms: u64,
+    warmup_enabled: bool,
+    queue: Arc<TaskQueue>,
+    agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
+) -> anyhow::Result<AgentOutput> {
+    // 创建内部 dummy flags（从不 pause/stop）
+    let flags = Arc::new(RunFlags::new());
+    let active_runs = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let mut runs = active_runs.lock().await;
+        runs.insert(session_id.clone(), flags.clone());
+    }
+
+    let stream = run_agent(
+        llm,
+        tools,
+        messages,
+        system,
+        tool_history,
+        db,
+        session_id.clone(),
+        session_dir,
+        tool_delay_ms,
+        warmup_enabled,
+        flags,
+        queue,
+        agent_contexts.clone(),
+        active_runs,
+    );
+
+    // 消费完整事件流
+    let mut assistant_reply = String::new();
+    let mut total_usage: Option<TokenUsage> = None;
+    let mut error: Option<String> = None;
+
+    use tokio_stream::StreamExt;
+    let mut s = stream;
+    while let Some(event) = s.next().await {
+        match event {
+            AgentEvent::Text(t) => {
+                assistant_reply.push_str(&t);
+            }
+            AgentEvent::Usage(u) => {
+                total_usage = Some(u);
+            }
+            AgentEvent::Error(e) => {
+                error = Some(e);
+            }
+            _ => {}
+        }
+    }
+
+    // 流结束后从 agent_contexts 读取最终 messages
+    let messages = {
+        let map = agent_contexts.lock().await;
+        map.get(&session_id).cloned().unwrap_or_default()
+    };
+
+    if let Some(e) = error {
+        anyhow::bail!("agent 错误: {e}");
+    }
+
+    Ok(AgentOutput {
+        messages,
+        total_usage,
+        assistant_reply,
+    })
+}
+
+/// 准备 agent 上下文：解析 session、保存用户消息、加载历史 + SILENCES.md
+///
+/// 从 server `handle_chat()` 中提取的共享逻辑，server 和 lib 均可使用。
+pub async fn prepare_agent_context(
+    db: &Arc<Mutex<Db>>,
+    project_root: Option<&Path>,
+    session_id: Option<String>,
+    user_message: &str,
+    system: Option<&str>,
+) -> anyhow::Result<PreparedContext> {
+    // 解析会话 ID
+    let is_new = session_id.as_ref().map_or(true, |s| s.is_empty());
+    let session_id = if !is_new {
+        session_id.unwrap()
+    } else {
+        let db = db.lock().await;
+        let sid = db.create_session()?;
+        // 新会话初始化上下文文件
+        if let Some(root) = project_root {
+            let _ = context::init_session_context(root, &sid);
+        }
+        sid
+    };
+
+    // 保存用户消息
+    {
+        let db = db.lock().await;
+        let msg = Message::new_user("user", user_message);
+        db.save_message(&session_id, &msg)?;
+    }
+
+    // 加载历史消息
+    let history = {
+        let db = db.lock().await;
+        db.get_messages(&session_id)?
+    };
+
+    // 加载 SILENCES.md
+    let ctx = context::load_project_context(project_root, Some(&session_id));
+    let silences_name = ctx.session_dir.join("SILENCES.md").to_string_lossy().to_string();
+    let mut messages: Vec<Message> = Vec::new();
+    if let Some(ref silences) = ctx.silences_md {
+        messages.push(Message::new_user(&silences_name, silences));
+    }
+    messages.extend(history);
+
+    // 日志输出
+    eprintln!("——[prepare_agent_context]————————————————————————");
+    eprintln!("  session={} msgs={} new={} silences={}",
+        &session_id[..8.min(session_id.len())],
+        messages.len(),
+        is_new,
+        ctx.silences_md.is_some(),
+    );
+    for (i, msg) in messages.iter().enumerate() {
+        let preview: String = msg.content.chars().take(120).collect();
+        let rc = if msg.reasoning_content.is_some() { " +reasoning" } else { "" };
+        let tc = if msg.tool_calls.is_some() { " +tool_calls" } else { "" };
+        let name_tag = msg.name.as_ref().map(|n| format!(" @{n}")).unwrap_or_default();
+        eprintln!("  [{i}][{}]{name_tag}{rc}{tc} {}",
+            msg.role,
+            if msg.content.len() > 120 { format!("{}...", preview) } else { preview },
+        );
+    }
+    if let Some(sys) = system {
+        let clipped: String = sys.chars().take(120).collect();
+        eprintln!("  [system] {clipped}...");
+    }
+
+    Ok(PreparedContext {
+        session_id,
+        messages,
+        session_dir: ctx.session_dir,
+        is_new,
+    })
 }
