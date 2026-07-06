@@ -161,16 +161,24 @@ pub fn run_agent(
         // 累计用量（所有轮次叠加后发给前端，让 cost 面板实时显示）
         let mut total_usage: Option<TokenUsage> = None;
 
+        // 构建一次 API 工具定义（每轮复用，只 clone）
+        let api_tools = toolcall::build_api_tools(&tools);
+        // 上下文快照条件写入标志
+        let mut messages_changed = true;
+
         for round in 0..usize::MAX {
-            // 快照当前上下文供 /state 端点查询（在 stop 检查前，确保 stop 时也能拿到最新状态）
-            {
-                let mut map = agent_contexts.lock().await;
-                map.insert(session_id.clone(), messages.clone());
-            }
-            // 持久化到 DB，刷新页面后仍可恢复
-            {
-                let db_lock = db.lock().await;
-                let _ = db_lock.save_context_snapshot(&session_id, &messages);
+            // 快照当前上下文供 /state 端点查询（仅在 messages 有变化时写入）
+            if messages_changed {
+                {
+                    let mut map = agent_contexts.lock().await;
+                    map.insert(session_id.clone(), messages.clone());
+                }
+                // 持久化到 DB，刷新页面后仍可恢复
+                {
+                    let db_lock = db.lock().await;
+                    let _ = db_lock.save_context_snapshot(&session_id, &messages);
+                }
+                messages_changed = false;
             }
 
             // 暂停等待循环（每轮开始时检查，等待外部 resume 或 stop）
@@ -748,4 +756,86 @@ pub async fn prepare_agent_context(
         session_dir: ctx.session_dir,
         is_new,
     })
+}
+
+/// 累计并保存 token 用量（纯文本分支和 tool call 分支共用）
+async fn accumulate_usage(
+    round_usage: &Option<TokenUsage>,
+    total_usage: &mut Option<TokenUsage>,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    db: &Arc<Mutex<Db>>,
+    session_id: &str,
+    round: usize,
+) {
+    if let Some(ref u) = round_usage {
+        let total = total_usage.as_ref().map(|t|
+            TokenUsage::new(
+                t.input_tokens + u.input_tokens,
+                t.output_tokens + u.output_tokens,
+                t.cache_hit_tokens + u.cache_hit_tokens,
+                t.cache_miss_tokens + u.cache_miss_tokens,
+            )
+        ).unwrap_or_else(|| u.clone());
+        *total_usage = Some(total.clone());
+        let _ = tx.send(AgentEvent::Usage(total)).await;
+        {
+            let db_lock = db.lock().await;
+            let _ = db_lock.save_usage(session_id, round as u32, u);
+        }
+    }
+}
+
+/// 自动任务包装：无活跃任务时合成 add_task + start_task 并执行
+pub async fn wrap_auto_task(
+    tools: &[ToolDef],
+    queue: &TaskQueue,
+    context: &mut Vec<Message>,
+    message: &str,
+) {
+    if !queue.has_active() {
+        let msg_preview: String = message.chars().take(10).collect();
+        let task_id = format!("处理用户消息：{}", msg_preview);
+        let description = message;
+        let add_tc_id = "call_add".to_string();
+        let start_tc_id = "call_start".to_string();
+
+        // 合成 assistant tool_call 消息（add_task + start_task 并行）
+        let asst_msg = Message::new_tool_call(vec![
+            ToolCallValue {
+                id: add_tc_id.clone(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "add_task".into(),
+                    arguments: serde_json::json!({"id": task_id, "description": description}).to_string(),
+                },
+            },
+            ToolCallValue {
+                id: start_tc_id.clone(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "start_task".into(),
+                    arguments: serde_json::json!({"task_id": task_id, "description": description}).to_string(),
+                },
+            },
+        ]);
+        context.push(asst_msg);
+
+        // 执行 add_task
+        if let Ok(outcome) = toolcall::execute_tool(
+            tools, "add_task",
+            serde_json::json!({"id": task_id, "description": description}),
+        ).await {
+            context.push(Message::new_tool_result(&add_tc_id, &outcome.summary));
+        }
+
+        // 执行 start_task
+        if let Ok(outcome) = toolcall::execute_tool(
+            tools, "start_task",
+            serde_json::json!({"task_id": task_id, "description": description}),
+        ).await {
+            context.push(Message::new_tool_result(&start_tc_id, &outcome.summary));
+        }
+
+        eprintln!("[auto-task] 自动包装为任务: {task_id}");
+    }
 }
