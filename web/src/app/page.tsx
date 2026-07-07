@@ -343,12 +343,30 @@ export default function Page() {
                 return [...copy, { role: 'assistant', content: '', isStreaming: true, reasoning: '' }];
               });
             } else if (parsed.type === 'context_rollback') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.isStreaming) copy.pop();
-                return [...copy, { role: 'assistant', content: '', isStreaming: true, reasoning: '' }];
-              });
+              // 后端 rollback 后消息已被重建（truncate + 重新添加总结/工具记录/CONTEXT.md），
+              // 前端重新拉取以保证状态一致。await 阻塞 SSE 循环，避免竞态。
+              if (activeId) {
+                try {
+                  const res = await fetch(`${apiBase}/sessions/${activeId}/messages`);
+                  if (res.ok) {
+                    const view: ViewMessage[] = await res.json();
+                    const converted: Message[] = view.map(v => ({
+                      role: v.role as Message['role'],
+                      content: v.content,
+                      reasoning: v.reasoning_content,
+                      toolCalls: v.tool_calls?.map(tc => ({
+                        id: undefined,
+                        name: tc.name,
+                        args: tc.args,
+                        result: tc.result,
+                      })),
+                    }));
+                    setMessages(converted);
+                  }
+                } catch (e) {
+                  console.warn('rollback 后重新加载消息失败:', e);
+                }
+              }
             }
           } catch (e) { console.warn('SSE JSON 解析失败:', e, data); }
         }
