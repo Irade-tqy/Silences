@@ -276,6 +276,25 @@ async fn test_replace_no_match() {
     assert!(result.summary.contains("无匹配"));
 }
 
+#[tokio::test]
+async fn test_replace_dry_run() {
+    let dir = setup_test_dir("repl-dry");
+    let path = dir.join("hello.rs").to_string_lossy().to_string();
+    let result = call(
+        "replace",
+        serde_json::json!({"path": path, "pattern": "hello", "replacement": "world",
+          "extensions": ["rs"], "dry_run": true}),
+    )
+    .await
+    .unwrap();
+    assert!(result.summary.contains("DRY RUN"), "dry_run 应返回预览: {}", result.summary);
+    // 文件内容应未被修改
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("hello"), "dry_run 不应修改文件: {:?}", content);
+    assert_eq!(content.matches("hello").count(), 2, "dry_run 不应减少 hello");
+    assert!(result.inverse.is_none(), "dry_run 不应有逆操作");
+}
+
 // ============================================================
 // command
 // ============================================================
@@ -393,7 +412,7 @@ async fn test_cleanup() {
         "read-file", "read-empty", "read-range",
         "create-file", "create-exist",
         "edit-line", "edit-unique", "edit-multi", "edit-nope",
-        "repl-file", "repl-nope",
+        "repl-file", "repl-nope", "repl-dry",
         "trash-file", "regret-create",
     ] {
         cleanup(name);

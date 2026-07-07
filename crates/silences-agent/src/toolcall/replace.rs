@@ -48,6 +48,10 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 "regex": {
                     "type": "boolean",
                     "description": "true=启用正则（默认 false）"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "true=仅预览匹配结果，不实际替换（默认 false）"
                 }
             },
             "required": ["path", "pattern", "replacement", "extensions"],
@@ -65,6 +69,7 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let replacement = args["replacement"].as_str().context("缺少 replacement 参数")?;
     let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
     let extensions: HashSet<String> = args["extensions"]
         .as_array()
         .context("extensions 必须是数组")?
@@ -80,13 +85,13 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let mut changed_files: Vec<(String, String)> = Vec::new();
 
     if meta.is_dir() {
-        replace_in_dir(path, raw_pattern, replacement, use_regex, &extensions, &mut changed_files)?;
+        replace_in_dir(path, raw_pattern, replacement, use_regex, &extensions, &mut changed_files, dry_run)?;
     } else if use_regex {
         // 单文件：正则
-        replace_in_file_regex(path, raw_pattern, replacement, &mut changed_files)?;
+        replace_in_file_regex(path, raw_pattern, replacement, &mut changed_files, dry_run)?;
     } else {
         // 单文件：字面量
-        replace_in_file_literal(path, raw_pattern, replacement, &mut changed_files)?;
+        replace_in_file_literal(path, raw_pattern, replacement, &mut changed_files, dry_run)?;
     }
 
     if changed_files.is_empty() {
@@ -119,6 +124,36 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         .map(|(p, _)| p.clone())
         .collect();
 
+    if dry_run {
+        let mut summary = format!(
+            "[DRY RUN] 将在 {} 个文件中替换（共扫描 {} 个文件）:\n{}",
+            changed_files.len(),
+            changed_files.len(),
+            file_list.join("\n"),
+        );
+        // 截断过长输出
+        const DRY_RUN_TRUNCATE_TOK: usize = 800;
+        let count = changed_files.len();
+        let (truncated, was_truncated) = truncate_head_tok(&summary, DRY_RUN_TRUNCATE_TOK);
+        if was_truncated {
+            if let Some(ref cd) = console_dir {
+                let _ = fs::create_dir_all(cd);
+                let seq = REPLACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let out_path = cd.join(format!("replace_dry_run_{seq}.out"));
+                let full = format!(
+                    "replace dry-run (path: {})\npattern: {}\nreplacement: {}\n{} 个文件将被替换:\n{}\n",
+                    path, raw_pattern, replacement, count, file_list.join("\n"),
+                );
+                let _ = fs::write(&out_path, &full);
+                summary = format!(
+                    "{}\n还有 {} 个文件未显示（共 {} 个），完整列表: {}",
+                    truncated, count - file_list.len().min(1), count, out_path.display(),
+                );
+            }
+        }
+        return Ok(ToolOutcome::new(summary));
+    }
+
     let files_owned = changed_files.clone();
     Ok(ToolOutcome {
         summary: format!(
@@ -148,6 +183,7 @@ fn replace_in_file_regex(
     raw_pattern: &str,
     replacement: &str,
     changed: &mut Vec<(String, String)>,
+    dry_run: bool,
 ) -> Result<()> {
     let re = Regex::new(raw_pattern).context("正则表达式无效")?;
     let original = match read_file_robust(path) {
@@ -158,7 +194,9 @@ fn replace_in_file_regex(
     let content = normalize(&original);
     let new = replace_all_regex(&re, &content, replacement)?;
     if new != content {
-        fs::write(path, &new).context("写入文件失败")?;
+        if !dry_run {
+            fs::write(path, &new).context("写入文件失败")?;
+        }
         changed.push((path.to_string(), original));
     }
     Ok(())
@@ -170,6 +208,7 @@ fn replace_in_file_literal(
     pattern: &str,
     replacement: &str,
     changed: &mut Vec<(String, String)>,
+    dry_run: bool,
 ) -> Result<()> {
     let original = match read_file_robust(path) {
         Ok(c) => c,
@@ -179,7 +218,9 @@ fn replace_in_file_literal(
     let content = normalize(&original);
     let new = content.replace(pattern, replacement);
     if new != content {
-        fs::write(path, &new).context("写入文件失败")?;
+        if !dry_run {
+            fs::write(path, &new).context("写入文件失败")?;
+        }
         changed.push((path.to_string(), original));
     }
     Ok(())
@@ -193,6 +234,7 @@ fn replace_in_dir(
     use_regex: bool,
     exts: &HashSet<String>,
     changed: &mut Vec<(String, String)>,
+    dry_run: bool,
 ) -> Result<()> {
     for entry in fs::read_dir(dir).context("读取目录失败")? {
         let entry = entry?;
@@ -201,7 +243,7 @@ fn replace_in_dir(
         if path.is_dir() {
             // 安全兜底：跳过隐藏目录、node_modules、target、tokenizer
             if !name.starts_with('.') && name != "node_modules" && name != "target" && name != "tokenizer" {
-                replace_in_dir(&path.to_string_lossy(), pattern, replacement, use_regex, exts, changed)?;
+                replace_in_dir(&path.to_string_lossy(), pattern, replacement, use_regex, exts, changed, dry_run)?;
             }
         } else {
             // 安全兜底：跳过调试日志文件，避免自引用循环
@@ -218,9 +260,9 @@ fn replace_in_dir(
             }
             let ps = path.to_string_lossy().to_string();
             if use_regex {
-                replace_in_file_regex(&ps, pattern, replacement, changed)?;
+                replace_in_file_regex(&ps, pattern, replacement, changed, dry_run)?;
             } else {
-                replace_in_file_literal(&ps, pattern, replacement, changed)?;
+                replace_in_file_literal(&ps, pattern, replacement, changed, dry_run)?;
             }
         }
     }
