@@ -13,6 +13,7 @@ pub mod find;
 pub mod regret;
 pub mod command;
 pub mod trash;
+pub mod rename;
 pub mod checkpoint;
 pub mod rollback;
 pub mod list_checkpoints;
@@ -341,6 +342,7 @@ pub fn all_tools(
         regret::tool(history),
         command::tool(console_dir, limits),
         trash::tool(),
+        rename::tool(),
         checkpoint::tool(cp_stack.clone()),
         rollback::tool(cp_stack.clone()),
         list_checkpoints::tool(cp_stack),
