@@ -7,7 +7,7 @@ use std::fs;
 use std::sync::Arc;
 
 use anyhow::Result;
-use silences_agent::queue::TaskQueue;
+use silences_agent::checkpoint_stack::CheckpointStack;
 use silences_agent::toolcall::{self, ToolDef, ToolOutcome};
 use silences_agent::toolcall::regret::ToolHistory;
 use tokio::sync::Mutex;
@@ -33,7 +33,7 @@ fn tools() -> Vec<ToolDef> {
     toolcall::all_tools(
         history,
         Arc::new(Mutex::new(HashSet::new())),
-        Arc::new(TaskQueue::new()),
+        Arc::new(CheckpointStack::new()),
         None,
         Default::default(),
     )
@@ -325,7 +325,7 @@ async fn test_regret_undo_create() {
     let tools = toolcall::all_tools(
         history.clone(),
         Arc::new(Mutex::new(HashSet::new())),
-        Arc::new(TaskQueue::new()),
+        Arc::new(CheckpointStack::new()),
         None,
         Default::default(),
     );
@@ -361,7 +361,7 @@ async fn test_regret_empty_history() {
     let tools = toolcall::all_tools(
         history,
         Arc::new(Mutex::new(HashSet::new())),
-        Arc::new(TaskQueue::new()),
+        Arc::new(CheckpointStack::new()),
         None,
         Default::default(),
     );

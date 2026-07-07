@@ -1158,6 +1158,7 @@ html, body {
 .ctx-card-role-badge[data-role="user"] { color: var(--ds-brand-text); }
 .ctx-card-role-badge[data-role="assistant"] { color: var(--ds-state-success); }
 .ctx-card-role-badge[data-role="tool"] { color: var(--ds-state-warn); }
+.ctx-card-role-badge[data-role="system"] { color: #6366F1; }
 
 .ctx-card-chevron {
   flex-shrink: 0;
@@ -1603,6 +1604,11 @@ html, body {
   flex: 1;
   min-height: 0;
   border-left: none;
+}
+
+/* 手机端 sidebar-scroll 始终可滚动，不依赖 hover */
+.mobile-page .sidebar .sidebar-scroll {
+  overflow-y: auto;
 }
 
 /* ── Responsive ── */

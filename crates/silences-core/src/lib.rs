@@ -72,9 +72,9 @@ impl Message {
     }
 }
 
-/// 任务项
+/// 检查点项
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskItem {
+pub struct CheckpointItem {
     pub id: String,
     pub description: String,
 }
@@ -348,8 +348,8 @@ pub struct SettingsUpdate {
 pub struct SessionState {
     /// 最后一次 LLM 调用时发送的 messages 快照
     pub context: Vec<Message>,
-    /// 当前任务队列中的待办任务
-    pub tasks: Vec<TaskItem>,
+    /// 当前检查点列表
+    pub checkpoints: Vec<CheckpointItem>,
     /// agent 运行状态："idle" | "running" | "paused"
     #[serde(default = "default_status")]
     pub status: String,
@@ -485,11 +485,11 @@ mod tests {
         assert!(m.name.is_none());
     }
 
-    // ─── TaskItem ────────────────────────────────────────────────────────
+    // ─── CheckpointItem ───────────────────────────────────────────────────
 
     #[test]
-    fn task_item_construction() {
-        let item = TaskItem {
+    fn checkpoint_item_construction() {
+        let item = CheckpointItem {
             id: "task_1".into(),
             description: "do something".into(),
         };
@@ -498,25 +498,25 @@ mod tests {
     }
 
     #[test]
-    fn task_item_roundtrip() {
-        let item = TaskItem {
+    fn checkpoint_item_roundtrip() {
+        let item = CheckpointItem {
             id: "t1".into(),
             description: "desc".into(),
         };
         let json = serde_json::to_string(&item).unwrap();
-        let back: TaskItem = serde_json::from_str(&json).unwrap();
+        let back: CheckpointItem = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "t1");
         assert_eq!(back.description, "desc");
     }
 
     #[test]
-    fn task_item_empty_strings() {
-        let item = TaskItem {
+    fn checkpoint_item_empty_strings() {
+        let item = CheckpointItem {
             id: "".into(),
             description: "".into(),
         };
         let json = serde_json::to_string(&item).unwrap();
-        let back: TaskItem = serde_json::from_str(&json).unwrap();
+        let back: CheckpointItem = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "");
         assert_eq!(back.description, "");
     }
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[test]
     fn session_state_status_defaults_to_idle() {
-        let json = r#"{"context":[],"tasks":[]}"#;
+        let json = r#"{"context":[],"checkpoints":[]}"#;
         let ss: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(ss.status, "idle");
     }
@@ -1347,11 +1347,11 @@ mod tests {
     fn session_state_construction() {
         let ss = SessionState {
             context: vec![Message::new("user", "hello")],
-            tasks: vec![TaskItem { id: "t1".into(), description: "do".into() }],
+            checkpoints: vec![CheckpointItem { id: "t1".into(), description: "do".into() }],
             status: "running".into(),
         };
         assert_eq!(ss.context.len(), 1);
-        assert_eq!(ss.tasks.len(), 1);
+        assert_eq!(ss.checkpoints.len(), 1);
         assert_eq!(ss.status, "running");
     }
 
@@ -1359,7 +1359,7 @@ mod tests {
     fn session_state_roundtrip() {
         let ss = SessionState {
             context: vec![],
-            tasks: vec![],
+            checkpoints: vec![],
             status: "paused".into(),
         };
         let json = serde_json::to_string(&ss).unwrap();
@@ -1371,12 +1371,12 @@ mod tests {
     fn session_state_empty_roundtrip() {
         let ss = SessionState {
             context: vec![],
-            tasks: vec![],
+            checkpoints: vec![],
             status: "idle".into(),
         };
         let json = serde_json::to_string(&ss).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert!(back.context.is_empty());
-        assert!(back.tasks.is_empty());
+        assert!(back.checkpoints.is_empty());
     }
 }

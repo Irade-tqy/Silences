@@ -16,3 +16,4 @@ futures-util.workspace = true
 tokio-stream.workspace = true
 encoding_rs.workspace = true
 tokenizers.workspace = true
+chrono.workspace = true

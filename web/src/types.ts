@@ -21,7 +21,7 @@ export interface ToolCallEntry {
 }
 
 export interface Message {
-  role: 'user' | 'assistant' | 'tool';
+  role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
   reasoning?: string;
   isStreaming?: boolean;
@@ -64,13 +64,13 @@ export interface RawMessage {
   tool_call_id?: string;
 }
 
-export interface Task {
+export interface CheckpointItem {
   id: string;
   description: string;
 }
 
 export interface SessionState {
   context: RawMessage[];
-  tasks: Task[];
+  checkpoints: CheckpointItem[];
   status: string;
 }

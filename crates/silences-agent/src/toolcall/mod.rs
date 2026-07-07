@@ -13,16 +13,16 @@ pub mod find;
 pub mod regret;
 pub mod command;
 pub mod trash;
-pub mod start_task;
-pub mod end_task;
-pub mod add_task;
+pub mod checkpoint;
+pub mod rollback;
+pub mod list_checkpoints;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use crate::queue::TaskQueue;
+use crate::checkpoint_stack::CheckpointStack;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -63,9 +63,9 @@ pub struct ToolOutcome {
     pub rollback: bool,
     /// 若设置，表示需要用户审批，值为审批会话 ID
     pub approval_pending: Option<String>,
-    /// 工具执行后注入到对话中的额外消息（例如 end_task 注入 u_orch）
+    /// 工具执行后注入到对话中的额外消息（例如 rollback 注入 orch 指令）
     pub inject_messages: Vec<silences_core::Message>,
-    /// 延迟回退到下一轮（用于 end_task：先注入 inject_messages，等模型更新 CONTEXT.md 后再回退）
+    /// 延迟回退到下一轮（用于 rollback：tool result 指示 LLM 更新 CONTEXT.md，下一轮再截断）
     pub defer_rollback: bool,
 }
 
@@ -323,7 +323,7 @@ pub(super) fn truncate_head_tok(content: &str, max_tok: usize) -> (String, bool)
 pub fn all_tools(
     history: Arc<Mutex<ToolHistory>>,
     read_tracker: ReadTracker,
-    queue: Arc<TaskQueue>,
+    cp_stack: Arc<CheckpointStack>,
     session_dir: Option<PathBuf>,
     limits: ToolLimits,
 ) -> Vec<ToolDef> {
@@ -341,9 +341,9 @@ pub fn all_tools(
         regret::tool(history),
         command::tool(console_dir, limits),
         trash::tool(),
-        start_task::tool(queue.clone()),
-        end_task::tool(queue.clone()),
-        add_task::tool(queue),
+        checkpoint::tool(cp_stack.clone()),
+        rollback::tool(cp_stack.clone()),
+        list_checkpoints::tool(cp_stack),
     ]
 }
 

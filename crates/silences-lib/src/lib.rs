@@ -31,10 +31,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use silences_agent::agent::{run_agent_blocking, prepare_agent_context, wrap_auto_task};
+use silences_agent::agent::{run_agent_blocking, prepare_agent_context, auto_checkpoint};
 use silences_agent::toolcall::{self, ReadTracker};
 use silences_agent::toolcall::regret::ToolHistory;
-use silences_agent::queue::TaskQueue;
+use silences_agent::checkpoint_stack::CheckpointStack;
 use silences_core::{Message, TokenUsage, ToolLimits};
 use silences_db::Db;
 use silences_llm::LlmClient;
@@ -81,7 +81,6 @@ pub struct Silences {
     db: Arc<Mutex<Db>>,
     /// 每个会话的 agent 工具历史（用于 regret，跨 process_turn 调用保持）
     tool_histories: StdMutex<HashMap<String, Arc<Mutex<ToolHistory>>>>,
-    task_queue: Arc<TaskQueue>,
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
     project_root: Option<PathBuf>,
     system_prompt: Option<String>,
@@ -107,7 +106,6 @@ impl Silences {
             llm,
             db: Arc::new(Mutex::new(db)),
             tool_histories: StdMutex::new(HashMap::new()),
-            task_queue: Arc::new(TaskQueue::new()),
             agent_contexts: Arc::new(Mutex::new(HashMap::new())),
             project_root: config.project_root,
             system_prompt: config.system_prompt,
@@ -126,7 +124,7 @@ impl Silences {
         }
 
         // 1. 准备上下文
-        let mut prep = prepare_agent_context(
+        let prep = prepare_agent_context(
             &self.db,
             self.project_root.as_deref(),
             Some(session_id.to_string()),
@@ -135,7 +133,15 @@ impl Silences {
         )
         .await?;
 
-        // 2. 获取或创建此会话的工具历史（跨 process_turn 调用保持，与 server 一致）
+        // 2. 从 DB 重建检查点栈（持久化的自动检查点）
+        let cp_stack = Arc::new(CheckpointStack::new());
+        if let Ok(checkpoints) = self.db.lock().await.get_checkpoints(session_id) {
+            for (cp_id, desc) in checkpoints {
+                cp_stack.push(cp_id, desc);
+            }
+        }
+
+        // 3. 获取或创建此会话的工具历史（跨 process_turn 调用保持，与 server 一致）
         let tool_history = {
             let mut histories = self.tool_histories.lock().unwrap();
             histories
@@ -147,15 +153,15 @@ impl Silences {
         let tools = toolcall::all_tools(
             tool_history.clone(),
             read_tracker,
-            self.task_queue.clone(),
+            cp_stack.clone(),
             Some(prep.session_dir.clone()),
             self.tool_limits,
         );
 
-        // ── 自动任务包装：无活跃任务时，把用户消息自动包装为 task ──
-        wrap_auto_task(&tools, &self.task_queue, &mut prep.messages, message).await;
+        // ── 每条用户消息后自动打检查点 ──
+        auto_checkpoint(&cp_stack, &self.db, session_id, message).await;
 
-        // 3. 阻塞式运行 agent
+        // 4. 阻塞式运行 agent
         let output = run_agent_blocking(
             self.llm.clone_for_agent(),
             tools,
@@ -167,7 +173,7 @@ impl Silences {
             Some(prep.session_dir),
             0, // tool_delay_ms — lib 模式不延迟
             self.warmup_enabled,
-            self.task_queue.clone(),
+            cp_stack,
             self.agent_contexts.clone(),
         )
         .await?;

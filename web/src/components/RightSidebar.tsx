@@ -63,16 +63,16 @@ export default function RightSidebar({
 
         <div className="right-panel-section">
           <div className="right-panel-title">
-            待完成任务 ({(sessionState?.tasks ?? []).length})
+            检查点 ({(sessionState?.checkpoints ?? []).length})
           </div>
-          {(sessionState?.tasks ?? []).map(t => (
-            <div className="task-item" key={t.id}>
-              <span className="task-id">{t.id}</span>
-              <span className="task-desc">{t.description}</span>
+          {(sessionState?.checkpoints ?? []).map((cp, i) => (
+            <div className="task-item" key={cp.id}>
+              <span className="task-id">{i + 1}. {cp.id}</span>
+              <span className="task-desc">{cp.description}</span>
             </div>
           ))}
-          {(!sessionState || sessionState.tasks.length === 0) && (
-            <div className="right-empty">无待办任务</div>
+          {(!sessionState || sessionState.checkpoints.length === 0) && (
+            <div className="right-empty">暂无检查点</div>
           )}
         </div>
 

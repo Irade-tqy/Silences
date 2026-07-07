@@ -71,6 +71,14 @@ impl Db {
                 messages    TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                cp_id       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -121,6 +129,7 @@ impl Db {
         self.conn.execute("DELETE FROM messages WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM token_usage WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM context_snapshots WHERE session_id = ?1", rusqlite::params![id])?;
+        self.conn.execute("DELETE FROM checkpoints WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
@@ -138,11 +147,11 @@ impl Db {
         Ok(())
     }
 
-    /// 获取会话的所有可见消息（排除 hidden=1 的回滚消息）
+    /// 获取会话的所有消息（不过滤 hidden，前端完整展示）
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT role, content, reasoning_content, tool_calls, tool_call_id, name
-             FROM messages WHERE session_id = ?1 AND (hidden IS NULL OR hidden=0)
+             FROM messages WHERE session_id = ?1
              ORDER BY id",
         )?;
         let msgs = stmt
@@ -223,6 +232,31 @@ impl Db {
             rusqlite::params![session_id, name],
         )?;
         Ok(())
+    }
+
+    // ── 检查点 ──
+
+    /// 保存一个自动检查点
+    pub fn save_checkpoint(&self, session_id: &str, cp_id: &str, description: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO checkpoints (session_id, cp_id, description, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, cp_id, description, now],
+        )?;
+        Ok(())
+    }
+
+    /// 获取会话的所有自动检查点（按创建顺序）
+    pub fn get_checkpoints(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT cp_id, description FROM checkpoints WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let items = stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(items)
     }
 
     // ── Token 用量 ──
@@ -503,14 +537,14 @@ mod tests {
     }
 
     #[test]
-    fn test_hidden_message_not_returned() {
+    fn test_hidden_message_still_returned() {
         let db = Db::open_in_memory().unwrap();
         let sid = db.create_session().unwrap();
         db.save_message(&sid, &Message::new("user", "你好")).unwrap();
-        // Hide all messages in this session (id 1 > 0)
+        // 即使隐藏，get_messages 也应返回所有消息
         db.hide_messages_after(&sid, 0).unwrap();
         let msgs = db.get_messages(&sid).unwrap();
-        assert!(msgs.is_empty(), "hidden messages should not be returned by get_messages");
+        assert_eq!(msgs.len(), 1, "get_messages 应返回 hidden 消息");
     }
 
     #[test]

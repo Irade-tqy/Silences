@@ -1,6 +1,6 @@
 # 再给实现
 
-当你 end task 了目标环节，根据是否从零开始，add & start task 后续环节。
+当你 rollback 了目标环节，根据是否从零开始，开始并 checkpoint 后续环节。
 
 **禁止在这里修改代码**
 
@@ -52,7 +52,7 @@
 
 提供一个拆到模块级别的列表。
 
-在和用户讨论通过后 end_task，将其写入会话的 CONTEXT.md。
+在和用户讨论通过后 rollback，将其写入会话的 CONTEXT.md。
 
 ---
 

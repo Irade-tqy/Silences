@@ -18,8 +18,8 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use futures_util::stream::Stream;
-use silences_agent::agent::{run_agent, AgentEvent, prepare_agent_context, wrap_auto_task};
-use silences_agent::queue::TaskQueue;
+use silences_agent::agent::{run_agent, AgentEvent, prepare_agent_context, auto_checkpoint};
+use silences_agent::checkpoint_stack::CheckpointStack;
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
 use silences_core::{ChatRequest, Message, RunFlags, Session, SessionState, SetStateRequest, Settings, SettingsUpdate, SseEvent, ViewMessage, messages_to_view};
@@ -51,8 +51,6 @@ struct AppState {
     tool_delay_ms: AtomicU64,
     /// 是否启用 agent loop prefix cache 预热
     warmup_enabled: AtomicBool,
-    /// 动态任务优先队列
-    task_queue: Arc<TaskQueue>,
     /// 每个会话最后一次发给 LLM 的 messages 快照
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
 }
@@ -116,7 +114,6 @@ pub async fn serve(
         project_root,
         tool_delay_ms: AtomicU64::new(tool_delay_ms),
         warmup_enabled: AtomicBool::new(warmup_enabled),
-        task_queue: Arc::new(TaskQueue::new()),
         agent_contexts: Arc::new(Mutex::new(HashMap::new())),
     });
 
@@ -169,7 +166,7 @@ async fn handle_chat(
 
     let session_id = prep.session_id;
     let is_new_session = prep.is_new;
-    let mut context = prep.messages;
+    let context = prep.messages;
 
     // 获取或创建此会话的工具历史
     let tool_history = {
@@ -180,18 +177,26 @@ async fn handle_chat(
             .clone()  // 克隆 Arc
     };
 
+    // 从 DB 重建检查点栈（持久化的自动检查点）
+    let cp_stack = Arc::new(CheckpointStack::new());
+    if let Ok(checkpoints) = state.db.lock().await.get_checkpoints(&session_id) {
+        for (id, desc) in checkpoints {
+            cp_stack.push(id, desc);
+        }
+    }
+
     // 注册工具（每个会话独立的读记录 + console 目录）
     let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
     let tools: Vec<ToolDef> = toolcall::all_tools(
         tool_history.clone(),
         read_tracker,
-        state.task_queue.clone(),
+        cp_stack.clone(),
         Some(prep.session_dir.clone()),
         Default::default(),
     );
 
-    // ── 自动任务包装：无活跃任务时，把用户消息自动包装为 task ──
-    wrap_auto_task(&tools, &state.task_queue, &mut context, &req.message).await;
+    // ── 每条用户消息后自动打检查点 ──
+    auto_checkpoint(&cp_stack, &state.db, &session_id, &req.message).await;
 
     // 如果该 session 已有活跃运行，先停止旧标志
     {
@@ -222,7 +227,7 @@ async fn handle_chat(
         state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
         warmup_enabled,
         flags,
-        state.task_queue.clone(),
+        cp_stack.clone(),
         state.agent_contexts.clone(),
         state.active_runs.clone(),
     );
@@ -448,7 +453,16 @@ async fn handle_session_state(
     };
     // 给 tool result 填函数名，前端无需再计算
     enrich_tool_names(&mut context);
-    let tasks = state.task_queue.list();
+    // 合并手动检查点（来自消息历史的 tool_call）+ 自动检查点（来自 DB）
+    let cp_stack = CheckpointStack::rebuild_from_messages(&context);
+    if let Ok(db_cps) = state.db.lock().await.get_checkpoints(&id) {
+        for (cp_id, desc) in db_cps {
+            if !cp_stack.list().iter().any(|c| c.id == cp_id) {
+                cp_stack.push(cp_id, desc);
+            }
+        }
+    }
+    let checkpoints = cp_stack.list();
     // 查询当前 agent 运行状态
     let status = {
         let runs = state.active_runs.lock().await;
@@ -458,7 +472,7 @@ async fn handle_session_state(
             "idle".to_string()
         }
     };
-    Ok(Json(SessionState { context, tasks, status }))
+    Ok(Json(SessionState { context, checkpoints, status }))
 }
 
 /// 重命名会话
