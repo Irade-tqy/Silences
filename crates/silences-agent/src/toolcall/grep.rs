@@ -49,6 +49,16 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 "regex": {
                     "type": "boolean",
                     "description": "true=启用正则（默认 false）"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "搜索起始行号（1-based，默认 1）"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "搜索结束行号（1-based，默认文件末尾）"
                 }
             },
             "required": ["path", "pattern", "extensions"],
@@ -87,14 +97,17 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
         .map(|v| v as usize)
         .unwrap_or(limits.grep_context_lines);
 
+    let start_line = args.get("start_line").and_then(Value::as_u64).map(|v| v as usize);
+    let end_line = args.get("end_line").and_then(Value::as_u64).map(|v| v as usize);
+
     let meta = fs::metadata(path).context("路径不存在")?;
 
     // (格式化输出, 该文件内的匹配条数)
     let mut results: Vec<(String, usize)> = Vec::new();
     if meta.is_dir() {
-        search_dir(path, &re, &extensions, &mut results, ctx_lines)?;
+        search_dir(path, &re, &extensions, &mut results, ctx_lines, start_line, end_line)?;
     } else {
-        search_file(path, &re, &mut results, ctx_lines)?;
+        search_file(path, &re, &mut results, ctx_lines, start_line, end_line)?;
     }
 
     if results.is_empty() {
@@ -149,8 +162,8 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     };
 
     let suffix = match file_path {
-        Some(ref p) => format!("\n...以及 {over_count} 条匹配（共 {total_matches} 条），完整输出: {}\n", p.display()),
-        None => format!("\n...以及 {over_count} 条匹配（共 {total_matches} 条），未设置 console 目录，请缩小搜索范围。\n"),
+        Some(ref p) => format!("\n...还有 {over_count} 条未显示（共 {total_matches} 条），完整输出: {}\n", p.display()),
+        None => format!("\n...还有 {over_count} 条未显示（共 {total_matches} 条），未设置 console 目录，请缩小搜索范围。\n"),
     };
 
     Ok(ToolOutcome::new(format!(
@@ -167,6 +180,8 @@ fn search_dir(
     exts: &HashSet<String>,
     results: &mut Vec<(String, usize)>,
     context_lines: usize,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
 ) -> Result<()> {
     for entry in fs::read_dir(dir).context("读取目录失败")? {
         let entry = entry?;
@@ -175,7 +190,7 @@ fn search_dir(
         if path.is_dir() {
             // 安全兜底：跳过隐藏目录、node_modules、target、tokenizer
             if !name.starts_with('.') && name != "node_modules" && name != "target" && name != "tokenizer" {
-                search_dir(&path.to_string_lossy(), re, exts, results, context_lines)?;
+                search_dir(&path.to_string_lossy(), re, exts, results, context_lines, start_line, end_line)?;
             }
         } else {
             // 安全兜底：跳过调试日志文件，避免自引用循环
@@ -185,7 +200,7 @@ fn search_dir(
             // 白名单检查：只搜指定扩展名
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if exts.contains(&ext.to_lowercase()) {
-                    search_file(&path.to_string_lossy(), re, results, context_lines)?;
+                    search_file(&path.to_string_lossy(), re, results, context_lines, start_line, end_line)?;
                 }
             }
         }
@@ -194,15 +209,26 @@ fn search_dir(
 }
 
 /// 搜索单个文件，如果匹配则 push (formatted_text, match_count) 到 results
-fn search_file(path: &str, re: &Regex, results: &mut Vec<(String, usize)>, context_lines: usize) -> Result<()> {
+fn search_file(
+    path: &str,
+    re: &Regex,
+    results: &mut Vec<(String, usize)>,
+    context_lines: usize,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<()> {
     let content = match read_file_robust(path) {
         Ok(c) => normalize(&c),
         Err(_) => return Ok(()), // 二进制文件跳过
     };
 
     let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let search_start = start_line.map(|s| s.saturating_sub(1)).unwrap_or(0);
+    let search_end = end_line.map(|e| e.min(total)).unwrap_or(total);
     let mut file_parts = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
+    for (offset, line) in lines[search_start..search_end].iter().enumerate() {
+        let i = offset + search_start;
         if re.is_match(line).unwrap_or(false) {
             let start = i.saturating_sub(context_lines);
             let end = (i + context_lines + 1).min(lines.len());
