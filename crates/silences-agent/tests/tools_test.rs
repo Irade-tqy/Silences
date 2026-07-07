@@ -55,6 +55,9 @@ async fn test_glance_dir() {
     let result = call("glance", serde_json::json!({"path": dir})).await.unwrap();
     assert!(!result.summary.is_empty());
     assert!(result.summary.contains("[DIR]") || result.summary.contains("[FILE]"));
+    // 行号替代字节数
+    assert!(result.summary.contains("行"), "glance 应显示行数而非 bytes: {}", result.summary);
+    assert!(!result.summary.contains("bytes"), "glance 不应显示 bytes: {}", result.summary);
     // 逆操作应为 None（只读工具）
     assert!(result.inverse.is_none());
 }
@@ -100,6 +103,45 @@ async fn test_grep_not_found() {
     assert!(result.summary.contains("无匹配"));
 }
 
+#[tokio::test]
+async fn test_grep_with_line_range() {
+    let dir = setup_test_dir("grep-range");
+    let path = dir.to_string_lossy().to_string();
+    // hello.rs 有三行，hello 出现在第1行和第3行
+    // 限制范围在第2~3行，应只匹配第3行
+    let result = call("grep", serde_json::json!({
+        "path": path,
+        "pattern": "hello",
+        "extensions": ["rs"],
+        "start_line": 2,
+        "end_line": 3,
+    }))
+    .await
+    .unwrap();
+    assert!(result.summary.contains("匹配"));
+    // 应只匹配到1处（第3行）
+    assert!(result.summary.contains("1 处") || result.summary.contains("1条"),
+        "行范围限制后应仅 1 处匹配: {}", result.summary);
+}
+
+#[tokio::test]
+async fn test_grep_with_line_range_no_match() {
+    let dir = setup_test_dir("grep-range-no");
+    let path = dir.to_string_lossy().to_string();
+    // 只搜第1行，但 hello 在第1行，所以 still matches
+    let result = call("grep", serde_json::json!({
+        "path": path,
+        "pattern": "main",
+        "extensions": ["rs"],
+        "start_line": 1,
+        "end_line": 1,
+    }))
+    .await
+    .unwrap();
+    assert!(result.summary.contains("无匹配") || result.summary.contains("0 处"),
+        "第1行没有 main: {}", result.summary);
+}
+
 // ============================================================
 // read
 // ============================================================
@@ -136,6 +178,32 @@ async fn test_read_with_range() {
         .await
         .unwrap();
     assert!(result.summary.contains("main"));
+}
+
+#[tokio::test]
+async fn test_read_truncation() {
+    // 创建一个大文件触发自动截断
+    let dir = std::env::temp_dir().join("silences-test-read-trunc");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("large.rs").to_string_lossy().to_string();
+    let mut content = String::new();
+    for i in 0..200 {
+        content.push_str(&format!("// this is a very long line that should be line number {} in the test file to ensure we exceed the tokenizer's threshold\n", i + 1));
+    }
+    std::fs::write(&path, &content).unwrap();
+
+    let result = call("read", serde_json::json!({"path": path})).await.unwrap();
+    assert!(result.summary.contains("截断"), "大文件应显示截断: {}", result.summary);
+    // 截断公告在顶部（在第一行行号之前）
+    let lines: Vec<&str> = result.summary.lines().collect();
+    let top_content = lines.iter().find(|l| l.contains("截断"));
+    assert!(top_content.is_some(), "应有截断行");
+    // 截断公告不应有行号前缀（行号是6位右对齐数字）
+    let top = top_content.unwrap();
+    assert!(!top.starts_with("     1"), "截断公告不应被编号: {:?}", top);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ============================================================
@@ -243,6 +311,38 @@ async fn test_edit_pattern_not_found() {
     )
     .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_block_edit_start_fail() {
+    let dir = setup_test_dir("block-start-fail");
+    let path = dir.join("hello.rs").to_string_lossy().to_string();
+    let result = call("block_edit", serde_json::json!({
+        "file": path,
+        "start": "NONEXISTENT_START",
+        "end": "main",
+        "replacement": "REPLACED",
+    }))
+    .await;
+    assert!(result.is_err(), "block_edit 应失败");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("起始行匹配失败"), "start 失败应含'起始行匹配失败': {}", err);
+}
+
+#[tokio::test]
+async fn test_block_edit_end_fail() {
+    let dir = setup_test_dir("block-end-fail");
+    let path = dir.join("hello.rs").to_string_lossy().to_string();
+    let result = call("block_edit", serde_json::json!({
+        "file": path,
+        "start": "main",
+        "end": "NONEXISTENT_END",
+        "replacement": "REPLACED",
+    }))
+    .await;
+    assert!(result.is_err(), "block_edit 应失败");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("结束行匹配失败"), "end 失败应含'结束行匹配失败': {}", err);
 }
 
 // ============================================================

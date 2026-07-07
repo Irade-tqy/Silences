@@ -158,4 +158,33 @@ mod tests {
         let err = history.undo().unwrap_err();
         assert!(err.to_string().contains("没有可撤销的操作"));
     }
+
+    #[test]
+    fn test_entries_empty() {
+        let history = ToolHistory::new(5);
+        assert!(history.entries().is_empty());
+    }
+
+    #[test]
+    fn test_entries_returns_items() {
+        let mut history = ToolHistory::new(5);
+        history.push("edit", InverseOp::new("edit on foo.rs".into(), || Ok("ok".into())));
+        history.push("write", InverseOp::new("write bar.py".into(), || Ok("ok".into())));
+        let entries = history.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "edit");
+        assert_eq!(entries[0].1.description, "edit on foo.rs");
+        assert_eq!(entries[1].0, "write");
+        assert_eq!(entries[1].1.description, "write bar.py");
+    }
+
+    #[test]
+    fn test_entries_not_affected_by_undo() {
+        let mut history = ToolHistory::new(5);
+        history.push("edit", InverseOp::new("edit".into(), || Ok("ok".into())));
+        history.push("write", InverseOp::new("write".into(), || Ok("ok".into())));
+        history.undo().unwrap(); // removes "write"
+        assert_eq!(history.entries().len(), 1);
+        assert_eq!(history.entries()[0].0, "edit");
+    }
 }

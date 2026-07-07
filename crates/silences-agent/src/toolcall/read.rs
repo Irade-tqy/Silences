@@ -143,11 +143,13 @@ async fn execute(args: Value, read_tracker: Arc<Mutex<HashSet<String>>>) -> Resu
 
 /// 截断并生成带行号的输出行。
 ///
+/// pub(super) 对外暴露供测试。
+///
 /// 返回 (numbered_lines, warning_lines, was_truncated)：
 /// - numbered_lines：每行已编号的文本（或公告行，不带编号）
 /// - warning_lines：截断公告行（不带编号，放在顶部）
 /// - was_truncated：是否实际截断
-fn format_lines_with_truncation(content: &str, total_lines: usize) -> (Vec<String>, Vec<String>, bool) {
+pub(super) fn format_lines_with_truncation(content: &str, total_lines: usize) -> (Vec<String>, Vec<String>, bool) {
     const THRESHOLD_TOK: usize = 2000;
     const HEAD_TOK: usize = 1500;
     const TAIL_TOK: usize = 500;
@@ -214,4 +216,71 @@ fn format_lines_with_truncation(content: &str, total_lines: usize) -> (Vec<Strin
     }
 
     (numbered, warnings, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_lines_under_threshold() {
+        let content = "line1\nline2\nline3";
+        let (numbered, warnings, truncated) = format_lines_with_truncation(content, 3);
+        assert!(!truncated);
+        assert!(warnings.is_empty());
+        assert_eq!(numbered.len(), 3);
+        assert_eq!(numbered[0], "     1\tline1");
+        assert_eq!(numbered[2], "     3\tline3");
+    }
+
+    #[test]
+    fn test_format_lines_empty() {
+        let (numbered, warnings, truncated) = format_lines_with_truncation("", 0);
+        assert!(!truncated);
+        assert!(warnings.is_empty());
+        assert!(numbered.is_empty());
+    }
+
+    #[test]
+    fn test_truncation_notice_not_numbered() {
+        // 1500 lines to exceed the 2000 tok threshold
+        let content: String = (0..1500)
+            .map(|i| format!("this is line number {} of the test content yeah\n", i + 1))
+            .collect();
+        let total = content.lines().count();
+        let (numbered, warnings, truncated) = format_lines_with_truncation(&content, total);
+        assert!(truncated, "should be truncated with 1500 lines");
+        assert_eq!(warnings.len(), 1, "should have one warning");
+        assert!(warnings[0].starts_with("[截断"), "warning should start with [截断");
+
+        // Verify no line-numbered line contains the word "截断"
+        for line in &numbered {
+            if line.contains("截断") {
+                // The only line containing 截断 should be the separator "[...截断...]" (not numbered)
+                assert_eq!(line.trim(), "[...截断...]", "截断 should only appear in the separator, not in numbered lines");
+            }
+        }
+    }
+
+    #[test]
+    fn test_truncation_line_numbers_correct() {
+        let content: String = (0..1500)
+            .map(|i| format!("line_{}\n", i + 1))
+            .collect();
+        let total = content.lines().count();
+        let (numbered, _warnings, truncated) = format_lines_with_truncation(&content, total);
+        assert!(truncated, "should be truncated with 1500 lines");
+
+        // First numbered line should be line 1
+        assert!(numbered[0].ends_with("\tline_1"), "first line should be line_1: {:?}", numbered[0]);
+
+        // The separator shouldn't be numbered
+        let sep = numbered.iter().position(|l| l.trim() == "[...截断...]");
+        assert!(sep.is_some(), "should have [...] separator");
+
+        // Last numbered line should be the last line with correct number
+        let last = numbered.last().unwrap();
+        assert!(last.ends_with("\tline_1500"), "last line should be line_1500: {:?}", last);
+        assert!(last.starts_with("  1500\t"), "last line number should be 1500: {:?}", last);
+    }
 }
