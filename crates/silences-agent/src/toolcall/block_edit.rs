@@ -221,6 +221,7 @@ fn build_failure_feedback(
     console_dir: &Option<PathBuf>,
 ) -> String {
     let total_lines = content.lines().count();
+    #[allow(unused_assignments)]
     let mut body = String::new();
 
     // 先试 start 是否匹配
@@ -233,7 +234,7 @@ fn build_failure_feedback(
 
     if start_lines.is_empty() {
         // start 没匹配：模糊查找
-        body.push_str(&format!("未找到起始行匹配 '{}'。", start_pattern));
+        body = format!("❌ block_edit 失败：起始行匹配失败\n\n未找到起始行匹配 '{}'。", start_pattern);
         let candidates = fuzzy_find_best(content, start_pattern, 3);
         if !candidates.is_empty() {
             body.push_str("\n最接近的候选位置：\n");
@@ -264,12 +265,12 @@ fn build_failure_feedback(
         body.push_str("\n提示：如需查看文件内容，可使用 read 工具");
     } else {
         // start 匹配了，但后续找不到 end
-        body.push_str(&format!(
-            "起始行 '{}' 已匹配（{} 处），但之后未找到结束行 '{}'。",
+        body = format!(
+            "❌ block_edit 失败：结束行匹配失败\n\n起始行 '{}' 已匹配（{} 处），但之后未找到结束行 '{}'。",
             start_pattern,
             start_lines.len(),
             end_pattern,
-        ));
+        );
 
         // 显示最近的一个 start 位置附近
         let anchor = if let Some(tl_val) = target_line {
