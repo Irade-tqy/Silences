@@ -1,6 +1,7 @@
 //! glance — 概览目录或文件信息
 
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -80,17 +81,33 @@ fn glance_dir(path: &str) -> Result<(String, usize)> {
         if is_dir {
             lines.push(format!("  [DIR] {}/", name));
         } else {
-            let size = meta.map(|m| m.len()).unwrap_or(0);
+            let line_count = count_lines(&entry.path());
             let comment_hint = read_leading_comments(&entry.path());
-            if let Some(hint) = comment_hint {
-                lines.push(format!("  [FILE] {} ({} bytes) 开头: {}", name, size, hint));
-            } else {
-                lines.push(format!("  [FILE] {} ({} bytes)", name, size));
+            match (line_count, comment_hint) {
+                (Some(lc), Some(hint)) => {
+                    lines.push(format!("  [FILE] {} ({} 行) 开头: {}", name, lc, hint));
+                }
+                (Some(lc), None) => {
+                    lines.push(format!("  [FILE] {} ({} 行)", name, lc));
+                }
+                (None, Some(hint)) => {
+                    lines.push(format!("  [FILE] {} (?) 开头: {}", name, hint));
+                }
+                (None, None) => {
+                    lines.push(format!("  [FILE] {} (?)", name));
+                }
             }
         }
     }
 
     Ok((lines.join("\n"), total))
+}
+
+/// 快速统计文件总行数
+fn count_lines(path: &std::path::Path) -> Option<usize> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    Some(reader.lines().count())
 }
 
 fn glance_file(path: &str, limits: ToolLimits) -> Result<String> {
