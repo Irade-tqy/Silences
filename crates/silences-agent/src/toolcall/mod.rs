@@ -219,84 +219,6 @@ pub(super) fn get_tokenizer() -> Option<&'static Tokenizer> {
         .as_ref()
 }
 
-/// 大文件自动截断预览。
-///
-/// 使用 DeepSeek tokenizer 精确计数；tokenizer 不可用时回退字节估算（1 tok ≈ 4 字节）。
-/// 用 tokenizer offset 信息在精确的字符边界截断，保留开头 `head_tok` + 结尾 `tail_tok`。
-///
-/// 返回（截断后的内容, 是否被截断）。
-pub fn auto_truncate(
-    content: &str,
-    threshold_tok: usize,
-    head_tok: usize,
-    tail_tok: usize,
-) -> (String, bool) {
-    // ── 用真实 tokenizer 精确计数 ──
-    if let Some(tok) = get_tokenizer() {
-        if let Ok(enc) = tok.encode(content, true) {
-            let total = enc.len();
-            if total <= threshold_tok || head_tok + tail_tok >= total {
-                return (content.to_owned(), false);
-            }
-
-            let head_tok = head_tok.min(total);
-            let tail_tok = tail_tok.min(total);
-
-            let offsets = enc.get_offsets();
-            let head_end = offsets[head_tok.saturating_sub(1)].1.min(content.len());
-            let tail_start = offsets[total - tail_tok].0;
-            let tail_start = tail_start.max(head_end).min(content.len());
-
-            let head_lines = content[..head_end].lines().count();
-            let tail_line_start = content[..tail_start].lines().count().saturating_add(1);
-            let total_lines = content.lines().count();
-
-            let truncated = format!(
-                "{}…\n[截断：文件较大 (~{} tok，共 {} 行)，显示 1~{} 行 + {}~{} 行]\n…{}",
-                &content[..head_end],
-                total,
-                total_lines,
-                head_lines,
-                tail_line_start,
-                total_lines,
-                &content[tail_start..]
-            );
-            return (truncated, true);
-        }
-    }
-
-    // ── 回退：字节估算 ──
-    let threshold = threshold_tok * 4;
-    let head = head_tok * 4;
-    let tail = tail_tok * 4;
-
-    if content.len() <= threshold {
-        return (content.to_owned(), false);
-    }
-
-    let head_end = content.floor_char_boundary(head.min(content.len()));
-    let tail_start = content
-        .floor_char_boundary(content.len().saturating_sub(tail))
-        .max(head_end);
-
-    let head_lines = content[..head_end].lines().count();
-    let tail_line_start = content[..tail_start].lines().count().saturating_add(1);
-    let total_lines = content.lines().count();
-
-    let truncated = format!(
-        "{}…\n[截断：文件较大 (~{}B，共 {} 行)，显示 1~{} 行 + {}~{} 行]\n…{}",
-        &content[..head_end],
-        content.len(),
-        total_lines,
-        head_lines,
-        tail_line_start,
-        total_lines,
-        &content[tail_start..]
-    );
-
-    (truncated, true)
-}
-
 /// 截断字符串到前 max_tok 个 token。
 /// 使用 DeepSeek tokenizer 精确计数；回退字节估算（1 tok ≈ 4 字节）。
 /// 返回（截断后的字符串, 是否被截断）。
@@ -511,35 +433,6 @@ mod tests {
     fn test_build_api_tools_empty() {
         let api = build_api_tools(&[]);
         assert!(api.is_empty());
-    }
-
-    // ── auto_truncate ──
-
-    #[test]
-    fn test_auto_truncate_under_threshold() {
-        let content = "short text";
-        let (result, truncated) = auto_truncate(content, 100, 10, 10);
-        assert!(!truncated);
-        assert_eq!(result, content);
-    }
-
-    #[test]
-    fn test_auto_truncate_over_threshold() {
-        // Content large enough to exceed any tokenizer's threshold (5 tok)
-        let content = "hello world this is a test of the truncation function! ".repeat(20);
-        let (result, truncated) = auto_truncate(&content, 5, 3, 2);
-        assert!(truncated);
-        assert!(result.contains("[截断"));
-    }
-
-    #[test]
-    fn test_auto_truncate_truncated_contains_header_and_footer() {
-        let content = "hello world this is a test of the truncation function! ".repeat(20);
-        let (result, truncated) = auto_truncate(&content, 3, 1, 1);
-        assert!(truncated);
-        // Truncated output starts with the beginning of the content
-        assert!(result.starts_with("hello"));
-        assert!(result.contains("[截断"));
     }
 
     // ── truncate_head_tok ──
