@@ -394,27 +394,3 @@ async fn test_regret_empty_history() {
             || result.summary.contains("fail")
     );
 }
-
-// ============================================================
-// 清理
-// ============================================================
-
-/// 测试后清理临时目录
-fn cleanup(name: &str) {
-    let dir = std::env::temp_dir().join(format!("silences-test-{name}"));
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn test_cleanup() {
-    for name in [
-        "glance-dir", "glance-file", "grep-found", "grep-nf",
-        "read-file", "read-empty", "read-range",
-        "create-file", "create-exist",
-        "edit-line", "edit-unique", "edit-multi", "edit-nope",
-        "repl-file", "repl-nope", "repl-dry",
-        "trash-file", "regret-create",
-    ] {
-        cleanup(name);
-    }
-}
