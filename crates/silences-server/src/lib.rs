@@ -195,8 +195,8 @@ async fn handle_chat(
         Default::default(),
     );
 
-    // ── 每条用户消息后自动打检查点 ──
-    auto_checkpoint(&cp_stack, &state.db, &session_id, &req.message).await;
+    // ── 每条用户消息后自动打检查点，记录消息位置以便回滚截断 ──
+    auto_checkpoint(&cp_stack, &state.db, &session_id, &req.message, context.len()).await;
 
     // 如果该 session 已有活跃运行，先停止旧标志
     {

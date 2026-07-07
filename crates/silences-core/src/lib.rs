@@ -77,6 +77,9 @@ impl Message {
 pub struct CheckpointItem {
     pub id: String,
     pub description: String,
+    /// 是否为自动检查点（由 usr msg 触发创建，不在消息历史中）
+    #[serde(default)]
+    pub is_auto: bool,
 }
 
 /// Tool call（DeepSeek / OpenAI 格式）
@@ -492,9 +495,11 @@ mod tests {
         let item = CheckpointItem {
             id: "task_1".into(),
             description: "do something".into(),
+            is_auto: false,
         };
         assert_eq!(item.id, "task_1");
         assert_eq!(item.description, "do something");
+        assert!(!item.is_auto);
     }
 
     #[test]
@@ -502,6 +507,7 @@ mod tests {
         let item = CheckpointItem {
             id: "t1".into(),
             description: "desc".into(),
+            is_auto: false,
         };
         let json = serde_json::to_string(&item).unwrap();
         let back: CheckpointItem = serde_json::from_str(&json).unwrap();
@@ -514,6 +520,7 @@ mod tests {
         let item = CheckpointItem {
             id: "".into(),
             description: "".into(),
+            is_auto: false,
         };
         let json = serde_json::to_string(&item).unwrap();
         let back: CheckpointItem = serde_json::from_str(&json).unwrap();
@@ -1347,7 +1354,7 @@ mod tests {
     fn session_state_construction() {
         let ss = SessionState {
             context: vec![Message::new("user", "hello")],
-            checkpoints: vec![CheckpointItem { id: "t1".into(), description: "do".into() }],
+            checkpoints: vec![CheckpointItem { id: "t1".into(), description: "do".into(), is_auto: false }],
             status: "running".into(),
         };
         assert_eq!(ss.context.len(), 1);

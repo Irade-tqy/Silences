@@ -150,9 +150,10 @@ pub fn run_agent(
 
         // 初始 checkpoint = 传入 messages 的长度（稳定区边界，永不移动）
         let checkpoint = messages.len();
-        // 延迟回退标志 + 回退目标检查点 ID
+        // 延迟回退标志 + 回退目标检查点 ID + 是否为自动检查点
         let mut pending_rollback = false;
         let mut rollback_target_cp: Option<String> = None;
+        let mut rollback_is_auto = false;
 
         // 累计用量（所有轮次叠加后发给前端，让 cost 面板实时显示）
         let mut total_usage: Option<TokenUsage> = None;
@@ -297,9 +298,14 @@ pub fn run_agent(
                         Some(id) => id,
                         None => continue,
                     };
+                    let is_auto = rollback_is_auto;
+                    rollback_is_auto = false; // 复位
 
-                    // 在 messages 中找到目标检查点的 tool_result 位置
-                    let cp_end = {
+                    // 在 messages 中找到目标检查点的 tool_result 位置（或自动检查点的消息索引）
+                    let cp_end = if is_auto {
+                        // 自动检查点：使用存储的消息位置索引
+                        cp_stack.get_auto_msg_index(&target_cp)
+                    } else {
                         let mut found = None;
                         'outer: for (i, m) in messages.iter().enumerate() {
                             if let Some(tcs) = &m.tool_calls {
@@ -344,7 +350,22 @@ pub fn run_agent(
 
                     // 预检已在 tool 执行阶段确保检查点存在，此处不应失败
                     let Some(cp_end) = cp_end else {
-                        eprintln!("[agent] 内部 BUG：检查点 \"{target_cp}\" 在 pending_rollback 中未找到");
+                        eprintln!("[agent] 警告：检查点 \"{target_cp}\" 在 pending_rollback 中未找到截断位置（可能是重启后丢失了自动检查点的消息索引）");
+                        // 兜底：不清除消息但继续执行（通知 LLM）
+                        let fallback_outcome = Message::new_tool_result(
+                            &rollback_tc.as_ref()
+                                .and_then(|m| m.tool_calls.as_ref())
+                                .and_then(|tcs| tcs.first())
+                                .map(|tc| tc.id.clone())
+                                .unwrap_or_default(),
+                            &format!("⚠️ 检查点 \"{target_cp}\" 存在但无法确定截断位置（会话重启后自动检查点索引丢失）。请使用 checkpoint 工具创建新检查点后重试。"),
+                        );
+                        {
+                            let db_lock = db.lock().await;
+                            let _ = db_lock.save_message(&session_id, &fallback_outcome);
+                        }
+                        messages.push(fallback_outcome);
+                        messages_changed = true;
                         continue;
                     };
 
@@ -534,26 +555,30 @@ pub fn run_agent(
                     break;
                 }
 
-                // 捕获 rollback 目标检查点 ID（在 args 被 move 前），同时预检消息中存在性
+                // 捕获 rollback 目标检查点 ID（在 args 被 move 前），同时预检存在性
                 let mut rollback_precheck_failed: Option<String> = None;
                 if name == "rollback" {
                     if let Some(cp_id) = args.get("checkpoint_id").and_then(|v| v.as_str()) {
                         rollback_target_cp = Some(cp_id.to_string());
-                        // 预检：检查点是否在消息历史中存在
-                        let exists = messages.iter().any(|m| {
-                            m.tool_calls.as_ref().map_or(false, |tcs| {
-                                tcs.iter().any(|tc| {
-                                    tc.function.name == "checkpoint"
-                                        && serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                            .ok().as_ref()
-                                            .and_then(|v| v.get("id"))
-                                            .and_then(|v| v.as_str())
-                                            == Some(cp_id)
-                                })
-                            })
-                        });
-                        if !exists {
+                        // 预检：检查点是否在 cp_stack 中存在（覆盖自动 + 用户创建）
+                        let in_stack = cp_stack.list().iter().any(|c| c.id == cp_id);
+                        if !in_stack {
                             rollback_precheck_failed = Some(cp_id.to_string());
+                        } else {
+                            // 判断是否为自动检查点（不在消息历史中）
+                            let in_messages = messages.iter().any(|m| {
+                                m.tool_calls.as_ref().map_or(false, |tcs| {
+                                    tcs.iter().any(|tc| {
+                                        tc.function.name == "checkpoint"
+                                            && serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                                .ok().as_ref()
+                                                .and_then(|v| v.get("id"))
+                                                .and_then(|v| v.as_str())
+                                                == Some(cp_id)
+                                    })
+                                })
+                            });
+                            rollback_is_auto = !in_messages;
                         }
                     }
                 }
@@ -562,7 +587,7 @@ pub fn run_agent(
                     Ok(mut outcome) => {
                         // 预检失败：覆盖 outcome 为普通错误（不设 rollback/defer）
                         if let Some(cp_id) = rollback_precheck_failed {
-                            outcome.summary = format!("❌ 回滚失败：检查点 \"{cp_id}\" 在消息历史中不存在。请先使用 checkpoint 工具创建。");
+                            outcome.summary = format!("❌ 回滚失败：检查点 \"{cp_id}\" 不存在。请先使用 list_checkpoints 查看可用检查点。");
                             outcome.rollback = false;
                             outcome.defer_rollback = false;
                             outcome.inject_messages = vec![];
@@ -842,13 +867,15 @@ async fn accumulate_usage(
     }
 }
 
-/// 在每条用户消息后自动创建检查点（存入 cp_stack + 持久化到 DB）
+/// 在每条用户消息后自动创建检查点（存入 cp_stack + 持久化到 DB + 记录消息位置）
+/// `msg_count`：创建时消息总数（含刚添加的用户消息），用于 rollback 截断
 /// 不注入任何假消息，模型对此无感知
 pub async fn auto_checkpoint(
     cp_stack: &CheckpointStack,
     db: &Arc<Mutex<Db>>,
     session_id: &str,
     message: &str,
+    msg_count: usize,
 ) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -857,7 +884,7 @@ pub async fn auto_checkpoint(
     let id = format!("cp_{:x}", ts);
     let desc: String = message.chars().take(40).collect();
 
-    cp_stack.push(id.clone(), desc.clone());
+    cp_stack.push_auto(id.clone(), desc.clone(), msg_count);
 
     // 持久化到 DB，重启后可恢复
     let db_lock = db.lock().await;

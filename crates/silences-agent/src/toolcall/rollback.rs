@@ -15,13 +15,13 @@ use crate::checkpoint_stack::CheckpointStack;
 pub fn tool(stack: Arc<CheckpointStack>) -> ToolDef {
     ToolDef {
         name: "rollback",
-        description: "回滚到指定检查点。回滚会自动更新 CONTEXT.md 并用总结覆盖过程。",
+        description: "回滚到指定检查点。回滚会自动更新 CONTEXT.md 并用总结覆盖过程。\nwhy: 放弃本轮后续操作，回到打检查点时的状态。\nhow: 先调 list_checkpoints 查看可用 ID，然后传入对应 ID。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "checkpoint_id": {
                     "type": "string",
-                    "description": "目标检查点 ID"
+                    "description": "目标检查点 ID（从 list_checkpoints 的输出中复制，例如 \"cp_1a2b3c4d\"）"
                 }
             },
             "required": ["checkpoint_id"],

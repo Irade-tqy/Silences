@@ -158,8 +158,8 @@ impl Silences {
             self.tool_limits,
         );
 
-        // ── 每条用户消息后自动打检查点 ──
-        auto_checkpoint(&cp_stack, &self.db, session_id, message).await;
+        // ── 每条用户消息后自动打检查点，记录消息位置以便回滚截断 ──
+        auto_checkpoint(&cp_stack, &self.db, session_id, message, prep.messages.len()).await;
 
         // 4. 阻塞式运行 agent
         let output = run_agent_blocking(

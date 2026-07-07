@@ -11,17 +11,17 @@ use crate::checkpoint_stack::CheckpointStack;
 pub fn tool(stack: Arc<CheckpointStack>) -> ToolDef {
     ToolDef {
         name: "checkpoint",
-        description: "在当前位置打一个检查点\nwhy: 开始一个独立任务时",
+        description: "在当前位置打一个检查点\nwhy: 开始一个独立任务时，以便后续可回滚到此状态\nhow: id 用简短有意义的英文/数字（如 \"task_fix_login\"），传入 rollback(checkpoint_id=...) 时使用",
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "检查点 ID"
+                    "description": "检查点 ID（简短、可读，如 \"task_fix_login\"，后续 rollback 时使用此值）"
                 },
                 "description": {
                     "type": "string",
-                    "description": "简短的检查点描述，方便辨认"
+                    "description": "简短的检查点描述，方便辨认（会显示在 list_checkpoints 输出中）"
                 }
             },
             "required": ["id", "description"],
