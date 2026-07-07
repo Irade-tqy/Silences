@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::{InverseOp, ToolDef, ToolOutcome};
@@ -45,6 +46,11 @@ impl ToolHistory {
     pub fn can_undo(&self) -> bool {
         !self.entries.is_empty()
     }
+
+    /// 返回条目引用（用于显示）
+    pub fn entries(&self) -> &VecDeque<(String, InverseOp)> {
+        &self.entries
+    }
 }
 
 // ===== 工具定义 =====
@@ -53,19 +59,46 @@ pub fn tool(history: Arc<Mutex<ToolHistory>>) -> ToolDef {
     ToolDef {
         name: "regret",
         description:
-            "撤销上一个可逆操作（edit / block_edit / replace / write / trash）。\n注意：只读/command/任务管理/regret 自身等不可逆操作不会进队，无法撤销。\nwhy: 操作不符合预期时回退[不可撤销]",
+            "撤销可逆操作（edit / block_edit / replace / write / trash / rename）。使用 show=true 查看可撤销操作队列。\n注意：只读/command/任务管理/regret 自身等不可逆操作不会进队，无法撤销。可逆操作按后进先出 (LIFO) 顺序撤销。\nwhy: 操作不符合预期时回退[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "show": {
+                    "type": "boolean",
+                    "description": "true=仅显示可撤销操作列表，不执行撤销（默认 false）"
+                }
+            },
             "required": [],
             "additionalProperties": false
         }),
-        handler: Box::new(move |_args| {
+        handler: Box::new(move |args| {
             let h = history.clone();
             Box::pin(async move {
                 let mut history = h.lock().await;
-                let summary = history.undo().unwrap_or_else(|e| format!("regret 失败: {e}"));
-                Ok(ToolOutcome::new(summary))
+                let show = args.get("show").and_then(Value::as_bool).unwrap_or(false);
+                if show {
+                    if !history.can_undo() {
+                        Ok(ToolOutcome::new("regret: 当前无可撤销的操作。"))
+                    } else {
+                        let lines: Vec<String> = history
+                            .entries()
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .map(|(i, (tool_name, inv))| {
+                                format!("{}. [{}] {}", i + 1, tool_name, inv.description)
+                            })
+                            .collect();
+                        Ok(ToolOutcome::new(format!(
+                            "regret: {} 条可撤销操作（最近操作在前）:\n{}",
+                            lines.len(),
+                            lines.join("\n"),
+                        )))
+                    }
+                } else {
+                    let summary = history.undo().unwrap_or_else(|e| format!("regret 失败: {e}"));
+                    Ok(ToolOutcome::new(summary))
+                }
             })
         }),
     }
