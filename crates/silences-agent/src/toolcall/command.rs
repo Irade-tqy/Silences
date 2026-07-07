@@ -40,7 +40,7 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
     ToolDef {
         name: "command",
         description:
-            "在 PowerShell 7.6 中执行命令，返回退出码、stdout 和 stderr\nhow: 用 `;` 而非 `&&`；管道不传文本[不可撤销]",
+            "在 PowerShell 7.6 中执行命令，返回退出码、stdout 和 stderr[不可撤销]",
         schema: serde_json::json!({
             "type": "object",
             "properties": {

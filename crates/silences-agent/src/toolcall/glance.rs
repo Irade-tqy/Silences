@@ -140,11 +140,6 @@ fn glance_file(path: &str, limits: ToolLimits) -> Result<String> {
         info.push_str(&format!("\n{}", p));
     }
 
-    // 文件行数多时提示用 read 读全文
-    if line_count > 500 {
-        info.push_str(&format!("\n[提示] 文件共 {} 行，仅显示文件开头。如需完整内容请使用 read 工具。", line_count));
-    }
-
     Ok(info)
 }
 
