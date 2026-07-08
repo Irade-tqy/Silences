@@ -234,22 +234,35 @@ async fn benchmark_scenario_a_debug_bugs() {
     eprintln!("系统提示词: {}", if system_prompt.is_some() { "已加载" } else { "未加载" });
     eprintln!("Worktree: {:?}", worktree);
 
-    // === 2. 创建记录目录 ===
+    // === 2. 清理 worktree（上次运行的残留，保证 agent 看到干净的初始状态） ===
+    eprintln!("重置 worktree 到干净状态...");
+    let reset_status = std::process::Command::new("git")
+        .args(["checkout", "--", "."])
+        .current_dir(&worktree)
+        .status()
+        .expect("git checkout 失败");
+    assert!(reset_status.success(), "重置 worktree 失败");
+    // 清理 untracked 的 .silences/（如果有）
+    let _ = std::fs::remove_dir_all(worktree.join(".silences"));
+    let _ = std::fs::remove_dir_all(worktree.join("bench-record"));
+
+    // === 3. 创建记录目录（绝对路径，避免 CWD 切换后路径失效） ===
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let record_dir = PathBuf::from("bench-record").join(format!("scenario-a-{ts}"));
+    let cwd = std::env::current_dir().expect("获取 CWD 失败");
+    let record_dir = cwd.join("bench-record").join(format!("scenario-a-{ts}"));
     fs::create_dir_all(&record_dir).expect("创建记录目录失败");
     eprintln!("记录目录: {:?}", record_dir);
 
     // 文件型 SQLite DB（不在 memory，跑完后可查询全部消息）
     let db_path = record_dir.join("db.sqlite");
-    // debug_dir：记录每次 API 请求体（raw 请求）
+    // debug_dir：记录每次 API 请求+响应（绝对路径）
     let debug_dir = record_dir.join("debug");
     fs::create_dir_all(&debug_dir).unwrap();
 
-    // === 3. 捕获跑前状态 ===
+    // === 4. 捕获跑前状态 ===
     let pre_diff = git_diff(&worktree);
     let pre_status = git_status(&worktree);
     eprintln!("跑前 git diff 长度: {} 字符", pre_diff.len());
@@ -261,7 +274,7 @@ async fn benchmark_scenario_a_debug_bugs() {
         eprintln!("跑前 git status:\n{}", pre_status);
     }
 
-    // === 4. 创建 Silences 实例 ===
+    // === 5. 创建 Silences 实例 ===
     let silences = match Silences::new(SilencesConfig {
         db_path: db_path.to_string_lossy().to_string(),
         api_key,
@@ -277,14 +290,14 @@ async fn benchmark_scenario_a_debug_bugs() {
         Err(e) => panic!("创建 Silences 失败: {e}"),
     };
 
-    // === 5. 切换到 worktree（让 agent 探索时 CWD 正确） ===
+    // === 6. 切换到 worktree（让 agent 探索时 CWD 正确） ===
     let orig_cwd = std::env::current_dir().ok();
     if let Err(e) = std::env::set_current_dir(&worktree) {
         panic!("无法切换到 worktree: {e}");
     }
     eprintln!("CWD -> worktree");
 
-    // === 6. 运行 agent ===
+    // === 7. 运行 agent ===
     let prompt = "我用番茄钟，切换了一些页面后切回去，发现系统时钟过了 5 分钟，它才进行了 1 分钟。修一下。";
     eprintln!("\n=== 开始运行 Scenario A ===");
     eprintln!("Prompt: {prompt}");

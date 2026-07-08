@@ -56,8 +56,8 @@ pub fn read_silences_md(session_dir: &Path) -> Option<String> {
 
 /// 初始化会话上下文文件
 ///
-/// - SILENCES.md：从项目根目录复制（如不存在则创建空的）
-/// - CONTEXT.md：从模板创建
+/// - SILENCES.md：从框架 templates/ 复制（框架约定，与用户项目无关）
+/// - CONTEXT.md：从框架 templates/ 复制
 ///
 /// 如果文件已存在则不覆盖。
 pub fn init_session_context(project_root: &Path, session_id: &str) -> std::io::Result<PathBuf> {
@@ -67,10 +67,13 @@ pub fn init_session_context(project_root: &Path, session_id: &str) -> std::io::R
         .join(session_id);
     fs::create_dir_all(&session_dir)?;
 
-    // SILENCES.md：从 templates/SILENCES.md 复制，替换占位符为实际路径
+    // 框架自己的 templates 目录（不依赖用户项目提供模板）
+    let framework_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+
+    // SILENCES.md：从框架 templates/ 复制，替换占位符为实际路径
     let silences_path = session_dir.join("SILENCES.md");
     if !silences_path.exists() {
-        let tpl = project_root.join("templates").join("SILENCES.md");
+        let tpl = framework_templates.join("SILENCES.md");
         if tpl.exists() {
             let content = std::fs::read_to_string(&tpl)?
                 .replace("{SilencesDataDirectory}", &session_dir.to_string_lossy());
@@ -80,10 +83,10 @@ pub fn init_session_context(project_root: &Path, session_id: &str) -> std::io::R
         }
     }
 
-    // CONTEXT.md：从 templates/CONTEXT.md 复制
+    // CONTEXT.md：从框架 templates/ 复制
     let context_path = session_dir.join("CONTEXT.md");
     if !context_path.exists() {
-        let tpl = project_root.join("templates").join("CONTEXT.md");
+        let tpl = framework_templates.join("CONTEXT.md");
         if tpl.exists() {
             fs::copy(tpl, &context_path)?;
         } else {

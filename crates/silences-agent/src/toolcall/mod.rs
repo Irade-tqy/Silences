@@ -191,6 +191,10 @@ pub(super) fn get_tokenizer() -> Option<&'static Tokenizer> {
                 "../../tokenizer/tokenizer.json",
             ];
 
+            // 基于 crate 目录的绝对路径（CWD 被切换后仍能找到）
+            let cargo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let repo_tokenizer = cargo_dir.join("../../tokenizer/tokenizer.json");
+
             // 优先环境变量
             let mut paths: Vec<std::path::PathBuf> = Vec::new();
             if let Ok(env_path) = std::env::var("SILENCES_TOKENIZER_PATH") {
@@ -199,6 +203,8 @@ pub(super) fn get_tokenizer() -> Option<&'static Tokenizer> {
             for c in candidates {
                 paths.push(std::path::PathBuf::from(c));
             }
+            // 基于 crate 目录的绝对路径（CWD 被切换后仍能找到）
+            paths.push(repo_tokenizer);
 
             for p in &paths {
                 if p.exists() {
