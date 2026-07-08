@@ -233,13 +233,15 @@ async fn benchmark_scenario_a_debug_bugs() {
     let session_id = silences.create_session().await.expect("创建 session 失败");
 
     let t0 = std::time::Instant::now();
+    eprintln!("[timer] process_turn Bug 1 start @ 0s");
     let r1 = silences.process_turn(&session_id, prompt1).await;
-    let wall1 = t0.elapsed().as_secs();
-    eprintln!("Bug 1 耗时: {wall1}s");
+    let wall1 = t0.elapsed();
+    eprintln!("[timer] process_turn Bug 1 done @ {:.1}s", wall1.as_secs_f64());
 
     let pair_path1 = debug_dir.join("api_pairs.jsonl");
 
     // 保存 Bug 1 diff（不重置 worktree，Bug 2 在 Bug 1 基础上继续）
+    let t_analysis = std::time::Instant::now();
     let diff1 = git_diff(&worktree);
     fs::write(record_dir.join("diff_bug1.patch"), &diff1).unwrap();
 
@@ -247,6 +249,7 @@ async fn benchmark_scenario_a_debug_bugs() {
         Ok(ref turn) => analyze_turn(turn, &db_path.to_string_lossy(), &session_id, &pair_path1, &worktree, "Bug 1"),
         Err(ref e) => serde_json::json!({"label": "Bug 1", "error": format!("{e:#}")}),
     };
+    eprintln!("[timer] analysis Bug 1 done @ {:.1}s", t_analysis.elapsed().as_secs_f64());
 
     // ──── Bug 2 ────
     let prompt2 = "还有就是我不是让你写一个五分钟休息计时的功能吗？怎么一闪而过了？";
