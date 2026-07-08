@@ -1,0 +1,11 @@
+{
+  "description": "Debug — 修复 Pomodoro 计时 bug",
+  "error": "FOREIGN KEY constraint failed",
+  "messages": [],
+  "prompt": "我用番茄钟，切换了一些页面后切回去，发现系统时钟过了 5 分钟，它才进行了 1 分钟。修一下。",
+  "reply": "",
+  "scenario": "A",
+  "timestamp_sec": 1783492680,
+  "usage": null,
+  "worktree": "E:/Programs/dailyPlanner-001"
+}

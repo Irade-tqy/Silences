@@ -15,7 +15,7 @@ use crate::checkpoint_stack::CheckpointStack;
 pub fn tool(stack: Arc<CheckpointStack>) -> ToolDef {
     ToolDef {
         name: "rollback",
-        description: "回滚到指定检查点。回滚会自动更新 CONTEXT.md 并用总结覆盖过程。\nwhy: 放弃本轮后续操作，回到打检查点时的状态。\nhow: 先调 list_checkpoints 查看可用 ID，然后传入对应 ID。",
+        description: "回滚到指定检查点，清空当前上下文，为下一个子任务做准备。每个子任务完成后必须 rollback。\nwhy: 完成一个独立修改后清理上下文、节省 token，以便开始下一个子任务。禁止连续修改多个文件而不 rollback。\nhow: 先调 list_checkpoints 查看可用 ID，然后传入对应 ID。回滚后会自动请求更新 CONTEXT.md。",
         schema: serde_json::json!({
             "type": "object",
             "properties": {

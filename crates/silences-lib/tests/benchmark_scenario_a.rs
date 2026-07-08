@@ -10,7 +10,7 @@
 //!   cargo test --test benchmark_scenario_a
 //!
 //! 输出：
-//!   target/bench-record/scenario-a-{timestamp}.json  — 完整请求/回复记录
+//!   bench-record/scenario-a-{timestamp}.json  — 完整请求/回复记录
 
 use std::fs;
 use std::path::PathBuf;
@@ -33,10 +33,18 @@ fn worktree_path() -> PathBuf {
     )
 }
 
-/// 数据库路径（包含系统提示词等配置）
-fn db_path() -> String {
-    std::env::var("SILENCES_DB_PATH")
-        .unwrap_or_else(|_| "E:/programs/Silences/silences.db".to_string())
+/// 从真实 DB 加载系统提示词，测试本身用 :memory:
+fn load_system_prompt() -> Option<String> {
+    let db_path = std::env::var("SILENCES_DB_PATH")
+        .unwrap_or_else(|_| "E:/programs/Silences/silences.db".to_string());
+    let path = PathBuf::from(&db_path);
+    if !path.exists() {
+        return None;
+    }
+    // 直接用 rusqlite 读取，避免依赖 silences_db
+    let conn = rusqlite::Connection::open(&db_path).ok()?;
+    let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").ok()?;
+    stmt.query_row([], |row| row.get::<_, String>(0)).ok()
 }
 
 /// 保存完整记录到 JSON 文件
@@ -91,9 +99,16 @@ async fn benchmark_scenario_a_debug_bugs() {
         worktree
     );
 
-    // 加载 DB 中的系统提示词（与 server 模式一致）
-    let _system_prompt_present = db_path();
-    eprintln!("DB 路径: {}", _system_prompt_present);
+    // 从真实 DB 加载系统提示词
+    let system_prompt = load_system_prompt();
+    eprintln!(
+        "系统提示词: {}",
+        if system_prompt.is_some() {
+            "已加载"
+        } else {
+            "未加载（使用默认）"
+        }
+    );
 
     // 切换到 worktree 目录，让 agent 的 glance/grep 探索起点正确
     let orig_cwd = std::env::current_dir().ok();
@@ -102,13 +117,13 @@ async fn benchmark_scenario_a_debug_bugs() {
     }
     eprintln!("CWD 切换到 worktree: {:?}", worktree);
 
-    // 1. 创建 Silences 实例
+    // 创建 Silences 实例（用 :memory: 避免外键约束问题）
     let silences = match Silences::new(SilencesConfig {
-        db_path: db_path(),
+        db_path: ":memory:".to_string(),
         api_key,
         base_url: None,
         model: Some("deepseek-v4-flash".to_string()),
-        system_prompt: None, // ← 从 DB 自动加载
+        system_prompt, // 显式传入从 DB 加载的提示词
         project_root: Some(worktree.clone()),
         tool_limits: None,
         warmup_enabled: false,
@@ -122,18 +137,23 @@ async fn benchmark_scenario_a_debug_bugs() {
         }
     };
 
-    // 2. Scenario A 初始 prompt
+    // 先创建 session
+    let session_id = silences
+        .create_session()
+        .await
+        .expect("创建 session 失败");
+
+    // Scenario A 初始 prompt
     let prompt = "我用番茄钟，切换了一些页面后切回去，发现系统时钟过了 5 分钟，它才进行了 1 分钟。修一下。";
 
-    // 3. 发送消息给 agent
-    let result = silences.process_turn("bench-scenario-a", prompt).await;
+    // 发送消息给 agent
+    let result = silences.process_turn(&session_id, prompt).await;
 
     // 恢复 CWD
     if let Some(cwd) = orig_cwd {
         let _ = std::env::set_current_dir(&cwd);
     }
 
-    // 4. 处理结果
     match result {
         Ok(turn) => {
             let record_path = save_record(
@@ -153,7 +173,7 @@ async fn benchmark_scenario_a_debug_bugs() {
                 );
             }
 
-            // 检查是否使用了 rollback
+            // 检查是否使用了 rollback/regret
             let all_text: String = turn
                 .messages
                 .iter()
