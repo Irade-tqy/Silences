@@ -57,12 +57,17 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
     let path = args["path"].as_str().context("缺少 path 参数")?;
     let raw_pattern = args["pattern"].as_str().context("缺少 pattern 参数")?;
     let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
-    let extensions: HashSet<String> = args["extensions"]
-        .as_array()
-        .context("extensions 必须是数组")?
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
-        .collect();
+    // extensions 兼容两种格式：数组 ["ts","tsx"] 或单字符串 "ts"
+    let extensions: HashSet<String> = match args.get("extensions") {
+        Some(Value::Array(arr)) => arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+            .collect(),
+        Some(Value::String(s)) => {
+            // LLM 有时传单个字符串而非数组，容错处理
+            std::iter::once(s.to_lowercase()).collect()
+        }
+        _ => anyhow::bail!("extensions 必须是数组（如 [\"ts\",\"tsx\"]）或单个扩展名字符串"),
+    };
     if extensions.is_empty() {
         anyhow::bail!("extensions 不能为空，请指定要搜索的文件扩展名，如 [\"rs\",\"ts\"]");
     }

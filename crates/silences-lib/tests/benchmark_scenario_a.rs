@@ -61,14 +61,14 @@ fn worktree_path() -> PathBuf {
 }
 
 fn git_diff(repo: &PathBuf) -> String {
-    let out = Command::new("git").args(["diff"]).current_dir(repo).output()
-        .expect("git diff 失败");
+    let out = Command::new("git").args(["diff", "HEAD"]).current_dir(repo).output()
+        .expect("git diff HEAD 失败");
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 fn git_diff_stat(repo: &PathBuf) -> String {
-    let out = Command::new("git").args(["diff", "--stat"]).current_dir(repo).output()
-        .expect("git diff --stat 失败");
+    let out = Command::new("git").args(["diff", "HEAD", "--stat"]).current_dir(repo).output()
+        .expect("git diff HEAD --stat 失败");
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
@@ -112,28 +112,41 @@ fn read_api_pairs(path: &PathBuf) -> Vec<serde_json::Value> {
 
 fn analyze_turn(
     turn: &silences_lib::TurnResult,
-    db_path: &str,
-    session_id: &str,
     pair_path: &PathBuf,
     worktree: &PathBuf,
     label: &str,
 ) -> serde_json::Value {
     let api_pairs = read_api_pairs(pair_path);
 
-    // 仅分析当前 turn 相关的 pair（简单启发：匹配 content 中是否有对应消息）
-    let raw = read_raw_messages(db_path, session_id);
-    let tool_names: Vec<String> = raw.iter().filter_map(|m| {
-        m["tool_calls"].as_array().and_then(|tcs| {
-            tcs.iter().map(|tc| tc["function"]["name"].as_str().unwrap_or("?").to_string()).next()
-        })
-    }).collect();
+    // 从 api_pairs 统计工具调用（不依赖 DB，DB 可能不完整）
+    let mut edit_n = 0usize; let mut cp_n = 0usize; let mut rb_n = 0usize;
+    let mut read_n = 0usize; let mut glance_n = 0usize; let mut regret_n = 0usize;
+    let mut find_n = 0usize; let mut grep_n = 0usize; let mut command_n = 0usize;
+    let mut block_edit_n = 0usize;
+    let mut tool_seq: Vec<String> = Vec::new();
 
-    let edit_n = tool_names.iter().filter(|n| *n == "edit").count();
-    let cp_n = tool_names.iter().filter(|n| *n == "checkpoint").count();
-    let rb_n = tool_names.iter().filter(|n| *n == "rollback").count();
-    let read_n = tool_names.iter().filter(|n| *n == "read").count();
-    let glance_n = tool_names.iter().filter(|n| *n == "glance").count();
-    let regret_n = tool_names.iter().filter(|n| *n == "regret").count();
+    for pair in &api_pairs {
+        let resp = &pair["response"];
+        if let Some(tcs) = resp["tool_calls"].as_array() {
+            for tc in tcs {
+                let name = tc["function"]["name"].as_str().unwrap_or("?").to_string();
+                tool_seq.push(name.clone());
+                match name.as_str() {
+                    "edit" => edit_n += 1,
+                    "block_edit" => block_edit_n += 1,
+                    "checkpoint" => cp_n += 1,
+                    "rollback" => rb_n += 1,
+                    "read" => read_n += 1,
+                    "glance" => glance_n += 1,
+                    "regret" => regret_n += 1,
+                    "find" => find_n += 1,
+                    "grep" => grep_n += 1,
+                    "command" => command_n += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
 
     // 每轮摘要
     let mut rounds = Vec::new();
@@ -159,12 +172,13 @@ fn analyze_turn(
     serde_json::json!({
         "label": label,
         "api_calls": api_pairs.len(),
-        "raw_messages": raw.len(),
         "tools": {
-            "total": tool_names.len(),
-            "edit": edit_n, "checkpoint": cp_n, "rollback": rb_n,
+            "total": tool_seq.len(),
+            "edit": edit_n, "block_edit": block_edit_n,
+            "checkpoint": cp_n, "rollback": rb_n,
             "read": read_n, "glance": glance_n, "regret": regret_n,
-            "sequence": tool_names,
+            "find": find_n, "grep": grep_n, "command": command_n,
+            "sequence": tool_seq,
         },
         "rounds": rounds,
         "turn_reply_tail": turn.reply.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
@@ -246,7 +260,7 @@ async fn benchmark_scenario_a_debug_bugs() {
     fs::write(record_dir.join("diff_bug1.patch"), &diff1).unwrap();
 
     let analysis1 = match r1 {
-        Ok(ref turn) => analyze_turn(turn, &db_path.to_string_lossy(), &session_id, &pair_path1, &worktree, "Bug 1"),
+        Ok(ref turn) => analyze_turn(turn, &pair_path1, &worktree, "Bug 1"),
         Err(ref e) => serde_json::json!({"label": "Bug 1", "error": format!("{e:#}")}),
     };
     eprintln!("[timer] analysis Bug 1 done @ {:.1}s", t_analysis.elapsed().as_secs_f64());
@@ -278,7 +292,7 @@ async fn benchmark_scenario_a_debug_bugs() {
                 &pair_path2,
                 bug2_pairs.iter().map(|p| serde_json::to_string(p).unwrap()).collect::<Vec<_>>().join("\n"),
             );
-            analyze_turn(turn, &db_path.to_string_lossy(), &session_id, &pair_path2, &worktree, "Bug 2")
+            analyze_turn(turn, &pair_path2, &worktree, "Bug 2")
         }
         Err(ref e) => serde_json::json!({"label": "Bug 2", "error": format!("{e:#}")}),
     };
