@@ -208,7 +208,14 @@ impl Silences {
     /// 创建新会话，返回会话 ID
     pub async fn create_session(&self) -> anyhow::Result<String> {
         let db = self.db.lock().await;
-        db.create_session()
+        let sid = db.create_session()?;
+        // 初始化会话上下文文件（SILENCES.md / CONTEXT.md）
+        if let Some(ref root) = self.project_root {
+            if let Err(e) = silences_agent::context::init_session_context(root, &sid) {
+                eprintln!("[lib] 初始化会话上下文失败: {e}");
+            }
+        }
+        Ok(sid)
     }
 
     /// 从已有上下文列表创建会话（预填充消息）
