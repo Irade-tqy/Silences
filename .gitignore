@@ -53,4 +53,5 @@ tokenizer/
 benchmark/
 hello.txt
 api_debug.json
+bench-record/
 thirdparty/
