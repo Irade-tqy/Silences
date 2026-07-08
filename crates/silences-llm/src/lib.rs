@@ -299,6 +299,59 @@ impl LlmClient {
             call_seq,
         })
     }
+
+    /// 非流式 JSON Output 调用（用于上下文管理等结构化输出场景）
+    ///
+    /// 使用 response_format: json_object，不支持 thinking 模式。
+    /// 传入 tools schema 仅用于 prefix cache 对齐（模型被指示不调用工具）。
+    pub async fn chat_json(
+        &self,
+        messages: &[Message],
+        system: Option<&str>,
+        tools: Option<Vec<Value>>,
+        max_tokens: u32,
+    ) -> Result<Value> {
+        let api_messages = Self::build_api_messages(messages, system);
+
+        let mut body = json!({
+            "model": self.model,
+            "messages": api_messages,
+            "stream": false,
+            "response_format": { "type": "json_object" },
+            "max_tokens": max_tokens,
+        });
+        // 传 tools schema 吃缓存，但不期望模型调用
+        if let Some(t) = tools {
+            body["tools"] = json!(t);
+        }
+
+        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let api_key = self.api_key.read().map(|k| k.clone()).unwrap_or_else(|_| String::new());
+        let response = self
+            .http
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {api_key}"))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("chat_json 请求失败: {e:#}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("chat_json API error HTTP {status}: {text}");
+        }
+
+        let full: Value = response.json().await
+            .map_err(|e| anyhow::anyhow!("chat_json 解析响应失败: {e:#}"))?;
+
+        let content = full["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("{}");
+        serde_json::from_str(content)
+            .map_err(|e| anyhow::anyhow!("chat_json 解析 content JSON 失败: {e:#}\ncontent: {content}"))
+    }
 }
 
 

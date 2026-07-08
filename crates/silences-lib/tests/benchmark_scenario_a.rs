@@ -1,11 +1,11 @@
 //! AgentBench Scenario A — Bug 1 + Bug 2 顺序修复
 //!
 //! 设计原则：
-//! 1. 文件型 SQLite DB，跑完可读全量消息（含 rollback 截断的）
+//! 1. 文件型 SQLite DB，跑完可读全量消息
 //! 2. debug_dir 捕获每次 API req+res 配对（含 reasoning）
 //! 3. 跑完检查 git diff 作为真实改动依据
 //! 4. 测试结束后不清理 worktree，留给你检查
-//! 5. Bug 1 → Bug 2 顺序发放，观察 agent 是否在无关任务前先 rollback
+//! 5. Bug 1 → Bug 2 顺序发放
 //!
 //! 运行：cargo test --test benchmark_scenario_a -- --nocapture --ignored
 //!
@@ -151,8 +151,6 @@ fn analyze_turn(
         "tools": {
             "total": tool_counts.values().sum::<usize>(),
             "edit": tool_counts.get("edit").unwrap_or(&0),
-            "checkpoint": tool_counts.get("checkpoint").unwrap_or(&0),
-            "rollback": tool_counts.get("rollback").unwrap_or(&0),
             "read": tool_counts.get("read").unwrap_or(&0),
             "glance": tool_counts.get("glance").unwrap_or(&0),
             "regret": tool_counts.get("regret").unwrap_or(&0),
@@ -163,9 +161,6 @@ fn analyze_turn(
         "rounds": rounds,
         "turn_reply_tail": turn.reply.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
         "usage": turn.usage,
-        "truncated_has_rollback": turn.messages.iter().any(|m| {
-            m.tool_calls.as_ref().map_or(false, |tcs| tcs.iter().any(|tc| tc.function.name == "rollback"))
-        }),
         "has_bug1": has_bug1,
         "has_bug2": has_bug2,
     })
@@ -314,11 +309,10 @@ async fn benchmark_scenario_a_debug_bugs() {
         println!("  API 调用:           {} 次", analysis["api_calls"]);
         println!("  Raw 消息数:         {}", analysis["raw_messages"]);
         let t = &analysis["tools"];
-        println!("  工具:               edit={}, cp={}, rb={}, read={}, glance={}, regret={}",
-            t["edit"], t["checkpoint"], t["rollback"], t["read"], t["glance"], t["regret"]);
+        println!("  工具:               edit={}, read={}, glance={}, regret={}",
+            t["edit"], t["read"], t["glance"], t["regret"]);
         println!("  Bug 1 修复标记:     {}", if analysis["has_bug1"].as_bool() == Some(true) { "✅" } else { "❌" });
         println!("  Bug 2 修复标记:     {}", if analysis["has_bug2"].as_bool() == Some(true) { "✅" } else { "❌" });
-        println!("  截断消息有 rollback: {}", if analysis["truncated_has_rollback"].as_bool() == Some(true) { "✅" } else { "❌" });
         println!("  回复末尾:           {}", analysis["turn_reply_tail"].as_str().unwrap_or(""));
     }
 

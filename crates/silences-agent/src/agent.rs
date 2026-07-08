@@ -13,7 +13,6 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use crate::toolcall::regret::ToolHistory;
 use crate::toolcall::{self, ToolDef};
-use crate::checkpoint_stack::CheckpointStack;
 use crate::context;
 
 /// Agent 产生的对外事件
@@ -31,8 +30,6 @@ pub enum AgentEvent {
         result: Option<String>,
     },
     Usage(TokenUsage),
-    /// 上下文回退通知（前端应关闭当前消息，开启新空消息）
-    ContextRollback,
     /// 消息边界：下一轮 LLM 响应是新消息
     MessageBoundary,
     /// agent 已暂停
@@ -130,9 +127,8 @@ pub fn run_agent(
     session_id: String,
     session_dir: Option<PathBuf>,
     tool_delay_ms: u64,
-    warmup_enabled: bool,
+    _warmup_enabled: bool,
     flags: Arc<RunFlags>,
-    cp_stack: Arc<CheckpointStack>,
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
     active_runs: Arc<Mutex<HashMap<String, Arc<RunFlags>>>>,
 ) -> ReceiverStream<AgentEvent> {
@@ -145,15 +141,6 @@ pub fn run_agent(
             runs.remove(&session_id);
             return;
         }
-
-        let _ = &cp_stack; // cp_stack 通过工具间接使用
-
-        // 初始 checkpoint = 传入 messages 的长度（稳定区边界，永不移动）
-        let checkpoint = messages.len();
-        // 延迟回退标志 + 回退目标检查点 ID + 是否为自动检查点
-        let mut pending_rollback = false;
-        let mut rollback_target_cp: Option<String> = None;
-        let mut rollback_is_auto = false;
 
         // 累计用量（所有轮次叠加后发给前端，让 cost 面板实时显示）
         let mut total_usage: Option<TokenUsage> = None;
@@ -291,154 +278,6 @@ pub fn run_agent(
                 // 保存用量（发送累计值）
                 accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round).await;
 
-                // 检查是否有待处理的延迟回滚
-                if pending_rollback {
-                    pending_rollback = false;
-
-                    // 获取回滚目标检查点 ID（pre-check 已确保存在）
-                    let target_cp = match rollback_target_cp.take() {
-                        Some(id) => id,
-                        None => continue,
-                    };
-                    let is_auto = rollback_is_auto;
-                    rollback_is_auto = false; // 复位
-
-                    // 在 messages 中找到目标检查点的 tool_result 位置（或自动检查点的消息索引）
-                    let cp_end = if is_auto {
-                        // 自动检查点：使用存储的消息位置索引
-                        cp_stack.get_auto_msg_index(&target_cp)
-                    } else {
-                        let mut found = None;
-                        'outer: for (i, m) in messages.iter().enumerate() {
-                            if let Some(tcs) = &m.tool_calls {
-                                for tc in tcs {
-                                    if tc.function.name != "checkpoint" { continue; }
-                                    let matches = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                        .ok()
-                                        .and_then(|v| v.get("id").and_then(|v| v.as_str().map(String::from)))
-                                        == Some(target_cp.clone());
-                                    if matches {
-                                        for j in (i+1)..messages.len() {
-                                            if messages[j].tool_call_id.as_deref() == Some(&tc.id) {
-                                                found = Some(j + 1);
-                                                break 'outer;
-                                            }
-                                        }
-                                        found = Some(i + 2);
-                                        break 'outer;
-                                    }
-                                }
-                            }
-                        }
-                        found
-                    };
-
-                    // 保存 rollback 工具调用记录（截断前复制）
-                    let rollback_tc = messages.iter().rfind(|m| {
-                        m.tool_calls.as_ref().map_or(false, |tcs| {
-                            tcs.iter().any(|tc| tc.function.name == "rollback")
-                        })
-                    }).cloned();
-                    let rb_call_id: Option<String> = rollback_tc.as_ref()
-                        .and_then(|m| m.tool_calls.as_ref())
-                        .and_then(|tcs| tcs.first())
-                        .map(|tc| tc.id.clone());
-                    let rollback_tr = rb_call_id.as_ref().and_then(|call_id| {
-                        messages.iter().rfind(|m| {
-                            m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id)
-                        }).cloned()
-                    });
-                    let round_summary = full_text.clone();
-
-                    // 预检已在 tool 执行阶段确保检查点存在，此处不应失败
-                    let Some(cp_end) = cp_end else {
-                        eprintln!("[agent] 警告：检查点 \"{target_cp}\" 在 pending_rollback 中未找到截断位置（可能是重启后丢失了自动检查点的消息索引）");
-                        // 兜底：不清除消息但继续执行（通知 LLM）
-                        let fallback_outcome = Message::new_tool_result(
-                            &rollback_tc.as_ref()
-                                .and_then(|m| m.tool_calls.as_ref())
-                                .and_then(|tcs| tcs.first())
-                                .map(|tc| tc.id.clone())
-                                .unwrap_or_default(),
-                            &format!("⚠️ 检查点 \"{target_cp}\" 存在但无法确定截断位置（会话重启后自动检查点索引丢失）。请使用 checkpoint 工具创建新检查点后重试。"),
-                        );
-                        {
-                            let db_lock = db.lock().await;
-                            let _ = db_lock.save_message(&session_id, &fallback_outcome);
-                        }
-                        messages.push(fallback_outcome);
-                        messages_changed = true;
-                        continue;
-                    };
-
-                    // 截断到目标检查点之后（保留 checkpoint 记录）
-                    messages.truncate(cp_end);
-                    messages_changed = true;
-
-                    let db_lock = db.lock().await;
-
-                    // 1. 本轮总结（checkpoint TR ↔ rollback TC 之间）
-                    if !round_summary.is_empty() {
-                        let summary_msg = Message {
-                            role: "assistant".into(),
-                            content: round_summary,
-                            name: None,
-                            reasoning_content: None,
-                            tool_calls: None,
-                            tool_call_id: None,
-                        };
-                        let _ = db_lock.save_message(&session_id, &summary_msg);
-                        messages.push(summary_msg);
-                        messages_changed = true;
-                    }
-
-                    // 2. rollback 工具记录（保留心智模型）
-                    if let Some(tc) = rollback_tc {
-                        messages.push(tc);
-                        messages_changed = true;
-                    }
-                    if let Some(mut tr) = rollback_tr {
-                        // 阶段 2：覆写 TR 内容，替换"回滚中"为"已回滚" + checkpoint 列表
-                        tr.content = format!(
-                            "✅ 已回滚到检查点 `{target_cp}`。\n\n当前检查点：\n{}",
-                            cp_stack.format_for_context()
-                        );
-                        messages.push(tr);
-                        messages_changed = true;
-                    }
-
-                    // 3. CONTEXT.md（rollback TR 之后，role: system）
-                    if let Some(ref session_dir) = session_dir {
-                        if let Some(fresh) = context::read_context_md(session_dir) {
-                            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                            let ctx_path = session_dir.join("CONTEXT.md").to_string_lossy().to_string();
-                            let system_content = format!("<!-- 更新于 {now} -->\n{fresh}");
-                            let ctx_msg = Message {
-                                role: "system".into(),
-                                content: system_content,
-                                name: Some(ctx_path),
-                                reasoning_content: None,
-                                tool_calls: None,
-                                tool_call_id: None,
-                            };
-                            let _ = db_lock.save_message(&session_id, &ctx_msg);
-                            messages.push(ctx_msg);
-                            messages_changed = true;
-                        }
-                    }
-                    drop(db_lock);
-
-                    // checkpoint 不变：稳定区始终是初始位置
-                    // ⚡ 预热稳定前缀
-                    if warmup_enabled && checkpoint < messages.len() {
-                        if let Err(e) = llm.warmup_prefix(&messages[..checkpoint], system.as_deref()).await {
-                            eprintln!("[agent] 警告: warmup 失败: {e}");
-                        }
-                    }
-
-                    let _ = tx.send(AgentEvent::ContextRollback).await;
-                    continue;
-                }
                 // 正常退出前最后一次快照（仅在 messages 有变化时写入）
                 if messages_changed {
                     {
@@ -489,8 +328,6 @@ pub fn run_agent(
             accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round).await;
 
             // 逐个执行工具
-            let mut needs_rollback = false;
-            let mut needs_defer_rollback = false;
             for tc in tc_accums.values() {
                 let name = match &tc.name {
                     Some(n) => n.clone(),
@@ -557,51 +394,8 @@ pub fn run_agent(
                     break;
                 }
 
-                // 捕获 rollback 目标检查点 ID（在 args 被 move 前），同时预检存在性
-                let mut rollback_precheck_failed: Option<String> = None;
-                if name == "rollback" {
-                    if let Some(cp_id) = args.get("checkpoint_id").and_then(|v| v.as_str()) {
-                        rollback_target_cp = Some(cp_id.to_string());
-                        // 预检：检查点是否在 cp_stack 中存在（覆盖自动 + 用户创建）
-                        let in_stack = cp_stack.list().iter().any(|c| c.id == cp_id);
-                        if !in_stack {
-                            rollback_precheck_failed = Some(cp_id.to_string());
-                        } else {
-                            // 判断是否为自动检查点（不在消息历史中）
-                            let in_messages = messages.iter().any(|m| {
-                                m.tool_calls.as_ref().map_or(false, |tcs| {
-                                    tcs.iter().any(|tc| {
-                                        tc.function.name == "checkpoint"
-                                            && serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                                .ok().as_ref()
-                                                .and_then(|v| v.get("id"))
-                                                .and_then(|v| v.as_str())
-                                                == Some(cp_id)
-                                    })
-                                })
-                            });
-                            rollback_is_auto = !in_messages;
-                        }
-                    }
-                }
-
                 match toolcall::execute_tool(&tools, &name, args).await {
-                    Ok(mut outcome) => {
-                        // 预检失败：覆盖 outcome 为普通错误（不设 rollback/defer）
-                        if let Some(cp_id) = rollback_precheck_failed {
-                            outcome.summary = format!("❌ 回滚失败：检查点 \"{cp_id}\" 不存在。请先使用 list_checkpoints 查看可用检查点。");
-                            outcome.rollback = false;
-                            outcome.defer_rollback = false;
-                            outcome.inject_messages = vec![];
-                        }
-
-                        if outcome.rollback {
-                            needs_rollback = true;
-                        }
-                        if outcome.defer_rollback {
-                            needs_defer_rollback = true;
-                        }
-
+                    Ok(outcome) => {
                         // 发射完成状态的 tool call
                         if !client_disconnected
                             && tx
@@ -663,26 +457,110 @@ pub fn run_agent(
                 }
             }
 
-            // 延迟回退（rollback）：tool result 已指示 LLM 更新 CONTEXT.md，下一轮再截断
-            if needs_defer_rollback {
-                pending_rollback = true;
-                let _ = tx.send(AgentEvent::MessageBoundary).await;
-                continue;
+            // ===== 上下文管理（每轮工具执行后）=====
+            // 注入提示词，让模型以 JSON Output 模式产出 Python 脚本，
+            // 脚本接收 messages JSON 通过 stdin，输出优化后的 messages JSON 到 stdout。
+            {
+                let ctx_mgmt_prompt = format!(
+                    "你是一个上下文管理器。当前有 {} 条消息。\n\
+                     请输出一个 JSON 对象，包含：\n\
+                     - \"analysis\": 字符串，说明你保留/删除了哪些消息及原因\n\
+                     - \"script\": 一个完整的 Python 3 脚本字符串（用 \\\\n 换行），从 sys.stdin 读取 messages JSON 数组，输出优化后的 messages JSON 数组\n\n\
+                     规则：\n\
+                     - 保留所有 user 和 system 消息\n\
+                     - 压缩重复/冗余的 assistant(tool_calls) 和 tool 消息\n\
+                     - 保留关键结论和工具执行结果，移除纯探索/失败/死胡同的内容\n\
+                     - 输出的 messages 必须是合法 JSON 数组，消息结构与输入一致\n\n\
+                     JSON 输出示例：\n\
+                     {{\"analysis\": \"...\", \"script\": \"import sys,json\\nmsgs=json.load(sys.stdin)\\n...\\njson.dump(result,sys.stdout)\"}}",
+                    messages.len()
+                );
+                let ctx_msg = Message {
+                    role: "system".into(),
+                    content: ctx_mgmt_prompt,
+                    name: Some("context_optimizer".into()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                };
+                messages.push(ctx_msg);
+                let ctx_msg_idx = messages.len() - 1; // 记录位置，事后删除
+
+                match llm.chat_json(
+                    &messages,
+                    system.as_deref(),
+                    Some(api_tools.clone()), // 传 tools 吃缓存，模型被指示不调用
+                    4096,
+                ).await {
+                    Ok(output) => {
+                        let script = output["script"].as_str().unwrap_or("");
+                        if !script.is_empty() {
+                            // 执行 Python 脚本
+                            let input_json = serde_json::to_string(&messages).unwrap_or_default();
+                            let mut child = match std::process::Command::new("py")
+                                .args(["-X", "utf8", "-c", script])
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .spawn()
+                            {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    eprintln!("[agent] 上下文管理脚本启动失败: {e}");
+                                    // 清理注入的消息后跳过
+                                    messages.remove(ctx_msg_idx);
+                                    continue;
+                                }
+                            };
+
+                            use std::io::Write;
+                            if let Some(mut stdin) = child.stdin.take() {
+                                let _ = writeln!(stdin, "{input_json}");
+                            }
+
+                            let output_result = child.wait_with_output();
+                            match output_result {
+                                Ok(out) if out.status.success() => {
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    if let Ok(new_msgs) = serde_json::from_str::<Vec<Message>>(&stdout) {
+                                        let old_len = messages.len();
+                                        messages = new_msgs;
+                                        messages_changed = true;
+                                        eprintln!(
+                                            "[agent] 上下文管理: {} → {} 条消息 ({})",
+                                            old_len,
+                                            messages.len(),
+                                            output["analysis"].as_str().unwrap_or("?")
+                                        );
+                                    } else {
+                                        eprintln!("[agent] 上下文管理脚本输出无效 JSON，保持原消息");
+                                        messages.remove(ctx_msg_idx); // 清理注入消息
+                                    }
+                                }
+                                Ok(out) => {
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    eprintln!("[agent] 上下文管理脚本退出码: {}, stderr: {}", out.status, stderr);
+                                    messages.remove(ctx_msg_idx);
+                                }
+                                Err(e) => {
+                                    eprintln!("[agent] 上下文管理脚本执行失败: {e}");
+                                    messages.remove(ctx_msg_idx);
+                                }
+                            }
+                        } else {
+                            // 模型判断不需要优化，清理注入消息
+                            messages.remove(ctx_msg_idx);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[agent] 上下文管理 LLM 调用失败: {e}");
+                        messages.remove(ctx_msg_idx);
+                    }
+                }
             }
 
-            // 普通回退（非 defer）
-            let mut did_rollback = false;
-            if needs_rollback && checkpoint < messages.len() {
-                messages.truncate(checkpoint);
-                messages_changed = true;
-                let _ = tx.send(AgentEvent::ContextRollback).await;
-                did_rollback = true;
-            }
-
-            // 没有 ContextRollback 时发 MessageBoundary，让前端知道新消息开始了
-            if !did_rollback {
-                let _ = tx.send(AgentEvent::MessageBoundary).await;
-            }
+            // 发 MessageBoundary，让前端知道新消息开始了
+            let _ = tx.send(AgentEvent::MessageBoundary).await;
 
             // 工具循环延迟（调试用）
             if tool_delay_ms > 0 {
@@ -722,7 +600,6 @@ pub async fn run_agent_blocking(
     session_dir: Option<PathBuf>,
     tool_delay_ms: u64,
     warmup_enabled: bool,
-    cp_stack: Arc<CheckpointStack>,
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
 ) -> anyhow::Result<AgentOutput> {
     // 创建内部 dummy flags（从不 pause/stop）
@@ -745,7 +622,6 @@ pub async fn run_agent_blocking(
         tool_delay_ms,
         warmup_enabled,
         flags,
-        cp_stack,
         agent_contexts.clone(),
         active_runs,
     );
@@ -880,26 +756,3 @@ async fn accumulate_usage(
     }
 }
 
-/// 在每条用户消息后自动创建检查点（存入 cp_stack + 持久化到 DB + 记录消息位置）
-/// `msg_count`：创建时消息总数（含刚添加的用户消息），用于 rollback 截断
-/// 不注入任何假消息，模型对此无感知
-pub async fn auto_checkpoint(
-    cp_stack: &CheckpointStack,
-    db: &Arc<Mutex<Db>>,
-    session_id: &str,
-    message: &str,
-    msg_count: usize,
-) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let id = format!("cp_{:x}", ts);
-    let desc: String = message.chars().take(40).collect();
-
-    cp_stack.push_auto(id.clone(), desc.clone(), msg_count);
-
-    // 持久化到 DB，重启后可恢复
-    let db_lock = db.lock().await;
-    let _ = db_lock.save_checkpoint(session_id, &id, &desc);
-}

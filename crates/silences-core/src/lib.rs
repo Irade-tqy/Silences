@@ -72,16 +72,6 @@ impl Message {
     }
 }
 
-/// 检查点项
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckpointItem {
-    pub id: String,
-    pub description: String,
-    /// 是否为自动检查点（由 usr msg 触发创建，不在消息历史中）
-    #[serde(default)]
-    pub is_auto: bool,
-}
-
 /// Tool call（DeepSeek / OpenAI 格式）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallValue {
@@ -286,9 +276,6 @@ pub enum SseEvent {
     /// 消息边界：前端应关闭当前流式消息并开启新消息
     #[serde(rename = "message_boundary")]
     MessageBoundary,
-    /// 上下文回退（兼作消息边界）
-    #[serde(rename = "context_rollback")]
-    ContextRollback,
     /// agent 已暂停
     #[serde(rename = "paused")]
     Paused,
@@ -351,8 +338,6 @@ pub struct SettingsUpdate {
 pub struct SessionState {
     /// 最后一次 LLM 调用时发送的 messages 快照
     pub context: Vec<Message>,
-    /// 当前检查点列表
-    pub checkpoints: Vec<CheckpointItem>,
     /// agent 运行状态："idle" | "running" | "paused"
     #[serde(default = "default_status")]
     pub status: String,
@@ -486,46 +471,6 @@ mod tests {
         assert_eq!(m.role, "");
         assert_eq!(m.content, "");
         assert!(m.name.is_none());
-    }
-
-    // ─── CheckpointItem ───────────────────────────────────────────────────
-
-    #[test]
-    fn checkpoint_item_construction() {
-        let item = CheckpointItem {
-            id: "task_1".into(),
-            description: "do something".into(),
-            is_auto: false,
-        };
-        assert_eq!(item.id, "task_1");
-        assert_eq!(item.description, "do something");
-        assert!(!item.is_auto);
-    }
-
-    #[test]
-    fn checkpoint_item_roundtrip() {
-        let item = CheckpointItem {
-            id: "t1".into(),
-            description: "desc".into(),
-            is_auto: false,
-        };
-        let json = serde_json::to_string(&item).unwrap();
-        let back: CheckpointItem = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.id, "t1");
-        assert_eq!(back.description, "desc");
-    }
-
-    #[test]
-    fn checkpoint_item_empty_strings() {
-        let item = CheckpointItem {
-            id: "".into(),
-            description: "".into(),
-            is_auto: false,
-        };
-        let json = serde_json::to_string(&item).unwrap();
-        let back: CheckpointItem = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.id, "");
-        assert_eq!(back.description, "");
     }
 
     // ─── ToolCallValue ───────────────────────────────────────────────────
@@ -1135,13 +1080,6 @@ mod tests {
     }
 
     #[test]
-    fn sse_event_context_rollback() {
-        let e = SseEvent::ContextRollback;
-        let json = serde_json::to_string(&e).unwrap();
-        assert_eq!(json, r#"{"type":"context_rollback"}"#);
-    }
-
-    #[test]
     fn sse_event_paused() {
         let e = SseEvent::Paused;
         let json = serde_json::to_string(&e).unwrap();
@@ -1177,7 +1115,6 @@ mod tests {
             SseEvent::Usage(TokenUsage::new(0, 0, 0, 0)),
             SseEvent::ToolCall { id: "".into(), name: "".into(), args: "".into(), result: None },
             SseEvent::MessageBoundary,
-            SseEvent::ContextRollback,
             SseEvent::Paused,
             SseEvent::Resumed,
             SseEvent::Error { message: "".into() },
@@ -1345,7 +1282,7 @@ mod tests {
 
     #[test]
     fn session_state_status_defaults_to_idle() {
-        let json = r#"{"context":[],"checkpoints":[]}"#;
+        let json = r#"{"context":[]}"#;
         let ss: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(ss.status, "idle");
     }
@@ -1354,11 +1291,9 @@ mod tests {
     fn session_state_construction() {
         let ss = SessionState {
             context: vec![Message::new("user", "hello")],
-            checkpoints: vec![CheckpointItem { id: "t1".into(), description: "do".into(), is_auto: false }],
             status: "running".into(),
         };
         assert_eq!(ss.context.len(), 1);
-        assert_eq!(ss.checkpoints.len(), 1);
         assert_eq!(ss.status, "running");
     }
 
@@ -1366,7 +1301,6 @@ mod tests {
     fn session_state_roundtrip() {
         let ss = SessionState {
             context: vec![],
-            checkpoints: vec![],
             status: "paused".into(),
         };
         let json = serde_json::to_string(&ss).unwrap();
@@ -1378,12 +1312,10 @@ mod tests {
     fn session_state_empty_roundtrip() {
         let ss = SessionState {
             context: vec![],
-            checkpoints: vec![],
             status: "idle".into(),
         };
         let json = serde_json::to_string(&ss).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert!(back.context.is_empty());
-        assert!(back.checkpoints.is_empty());
     }
 }

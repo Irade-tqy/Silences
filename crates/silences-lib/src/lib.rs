@@ -32,10 +32,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use silences_agent::agent::{run_agent_blocking, prepare_agent_context, auto_checkpoint};
+use silences_agent::agent::{run_agent_blocking, prepare_agent_context};
 use silences_agent::toolcall::{self, ReadTracker};
 use silences_agent::toolcall::regret::ToolHistory;
-use silences_agent::checkpoint_stack::CheckpointStack;
 use silences_core::{Message, TokenUsage, ToolLimits};
 use silences_db::Db;
 use silences_llm::LlmClient;
@@ -145,15 +144,7 @@ impl Silences {
         )
         .await?;
 
-        // 2. 从 DB 重建检查点栈（持久化的自动检查点）
-        let cp_stack = Arc::new(CheckpointStack::new());
-        if let Ok(checkpoints) = self.db.lock().await.get_checkpoints(session_id) {
-            for (cp_id, desc) in checkpoints {
-                cp_stack.push(cp_id, desc);
-            }
-        }
-
-        // 3. 获取或创建此会话的工具历史（跨 process_turn 调用保持，与 server 一致）
+        // 2. 获取或创建此会话的工具历史（跨 process_turn 调用保持，与 server 一致）
         let tool_history = {
             let mut histories = self.tool_histories.lock().unwrap();
             histories
@@ -165,15 +156,11 @@ impl Silences {
         let tools = toolcall::all_tools(
             tool_history.clone(),
             read_tracker,
-            cp_stack.clone(),
             Some(prep.session_dir.clone()),
             self.tool_limits,
         );
 
-        // ── 每条用户消息后自动打检查点，记录消息位置以便回滚截断 ──
-        auto_checkpoint(&cp_stack, &self.db, session_id, message, prep.messages.len()).await;
-
-        // 4. 阻塞式运行 agent
+        // 3. 阻塞式运行 agent
         let output = run_agent_blocking(
             self.llm.clone_for_agent(),
             tools,
@@ -185,7 +172,6 @@ impl Silences {
             Some(prep.session_dir),
             0, // tool_delay_ms — lib 模式不延迟
             self.warmup_enabled,
-            cp_stack,
             self.agent_contexts.clone(),
         )
         .await?;

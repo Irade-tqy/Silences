@@ -72,13 +72,6 @@ impl Db {
                 updated_at  TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id  TEXT NOT NULL,
-                cp_id       TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                created_at  TEXT NOT NULL
-            );
             ",
         )?;
         Ok(())
@@ -129,7 +122,6 @@ impl Db {
         self.conn.execute("DELETE FROM messages WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM token_usage WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM context_snapshots WHERE session_id = ?1", rusqlite::params![id])?;
-        self.conn.execute("DELETE FROM checkpoints WHERE session_id = ?1", rusqlite::params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
@@ -232,31 +224,6 @@ impl Db {
             rusqlite::params![session_id, name],
         )?;
         Ok(())
-    }
-
-    // ── 检查点 ──
-
-    /// 保存一个自动检查点
-    pub fn save_checkpoint(&self, session_id: &str, cp_id: &str, description: &str) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT OR IGNORE INTO checkpoints (session_id, cp_id, description, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, cp_id, description, now],
-        )?;
-        Ok(())
-    }
-
-    /// 获取会话的所有自动检查点（按创建顺序）
-    pub fn get_checkpoints(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT cp_id, description FROM checkpoints WHERE session_id = ?1 ORDER BY id",
-        )?;
-        let items = stmt
-            .query_map(rusqlite::params![session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(items)
     }
 
     // ── Token 用量 ──

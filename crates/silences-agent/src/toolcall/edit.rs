@@ -146,10 +146,8 @@ async fn execute(args: Value, console_dir: Option<PathBuf>, limits: ToolLimits) 
                 Ok(format!("已恢复 {}", file_owned))
             },
         )),
-        rollback: false,
         approval_pending: None,
         inject_messages: vec![],
-        defer_rollback: false,
     })
 }
 

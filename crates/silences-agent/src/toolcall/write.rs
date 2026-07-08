@@ -74,10 +74,7 @@ async fn execute(args: Value) -> Result<ToolOutcome> {
                 Ok(format!("已恢复 {}", path_owned))
             },
         )),
-        rollback: false,
-
         approval_pending: None,
-    inject_messages: vec![],
-    defer_rollback: false,
+        inject_messages: vec![],
     })
 }

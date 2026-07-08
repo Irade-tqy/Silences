@@ -71,13 +71,6 @@ fn reset_worktree(worktree: &PathBuf) {
     assert!(status.success(), "重置 worktree 失败");
 }
 
-fn check_rollback(messages: &[impl AsRef<str>]) -> bool {
-    messages.iter().any(|m| {
-        let s = m.as_ref();
-        s.contains("rollback") || s.contains("regret")
-    })
-}
-
 #[tokio::test]
 #[ignore]
 async fn benchmark_scenarios() {
@@ -120,9 +113,6 @@ async fn benchmark_scenarios() {
         Err(e) => { reset_worktree(&worktree); std::env::set_current_dir(orig_cwd.unwrap()).ok(); panic!("Scenario A 失败: {e}"); }
     };
 
-    let a_used_rollback = check_rollback(
-        &a.messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>()
-    );
     let a_tools: Vec<_> = a.messages.iter().filter_map(|m| {
         if m.role == "assistant" { m.tool_calls.as_ref().map(|tc| tc.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()) } else { None }
     }).collect();
@@ -131,7 +121,6 @@ async fn benchmark_scenarios() {
         a.usage.as_ref().map_or(0, |u| u.input_tokens),
         a.usage.as_ref().map_or(0, |u| u.output_tokens),
         a.usage.as_ref().map_or(0, |u| u.cache_hit_tokens));
-    println!("Scenario A rollback: {}", if a_used_rollback { "✅" } else { "❌" });
     println!("Scenario A 工具序列: {:?}", a_tools);
     println!("Scenario A 回复末尾: {}",
         a.reply.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>());
@@ -150,9 +139,6 @@ async fn benchmark_scenarios() {
         Err(e) => { reset_worktree(&worktree); std::env::set_current_dir(orig_cwd.unwrap()).ok(); panic!("Scenario B 失败: {e}"); }
     };
 
-    let b_used_rollback = check_rollback(
-        &b.messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>()
-    );
     let b_tools: Vec<_> = b.messages.iter().filter_map(|m| {
         if m.role == "assistant" { m.tool_calls.as_ref().map(|tc| tc.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()) } else { None }
     }).collect();
@@ -161,7 +147,6 @@ async fn benchmark_scenarios() {
         b.usage.as_ref().map_or(0, |u| u.input_tokens),
         b.usage.as_ref().map_or(0, |u| u.output_tokens),
         b.usage.as_ref().map_or(0, |u| u.cache_hit_tokens));
-    println!("Scenario B rollback: {}", if b_used_rollback { "✅" } else { "❌" });
     println!("Scenario B 工具序列: {:?}", b_tools);
     println!("Scenario B 回复末尾: {}",
         b.reply.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>());
@@ -181,7 +166,6 @@ async fn benchmark_scenarios() {
                 "reply": a.reply,
                 "messages": a.messages,
                 "usage": a.usage,
-                "used_rollback": a_used_rollback,
             },
             {
                 "name": "B (Feature)",
@@ -189,7 +173,6 @@ async fn benchmark_scenarios() {
                 "reply": b.reply,
                 "messages": b.messages,
                 "usage": b.usage,
-                "used_rollback": b_used_rollback,
             },
         ]
     });
@@ -198,10 +181,8 @@ async fn benchmark_scenarios() {
 
     // 报告结果
     println!("\n===== 结果汇总 =====");
-    println!("Scenario A (Debug)    rollback: {}  tokens: {}",
-        if a_used_rollback { "✅" } else { "❌" },
+    println!("Scenario A (Debug)    tokens: {}",
         a.usage.as_ref().map_or(0, |u| u.input_tokens + u.output_tokens));
-    println!("Scenario B (Feature)  rollback: {}  tokens: {}",
-        if b_used_rollback { "✅" } else { "❌" },
+    println!("Scenario B (Feature)  tokens: {}",
         b.usage.as_ref().map_or(0, |u| u.input_tokens + u.output_tokens));
 }

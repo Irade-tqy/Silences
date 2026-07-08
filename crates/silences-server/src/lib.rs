@@ -18,8 +18,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use futures_util::stream::Stream;
-use silences_agent::agent::{run_agent, AgentEvent, prepare_agent_context, auto_checkpoint};
-use silences_agent::checkpoint_stack::CheckpointStack;
+use silences_agent::agent::{run_agent, AgentEvent, prepare_agent_context};
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
 use silences_core::{ChatRequest, Message, RunFlags, Session, SessionState, SetStateRequest, Settings, SettingsUpdate, SseEvent, ViewMessage, messages_to_view};
@@ -177,26 +176,14 @@ async fn handle_chat(
             .clone()  // 克隆 Arc
     };
 
-    // 从 DB 重建检查点栈（持久化的自动检查点）
-    let cp_stack = Arc::new(CheckpointStack::new());
-    if let Ok(checkpoints) = state.db.lock().await.get_checkpoints(&session_id) {
-        for (id, desc) in checkpoints {
-            cp_stack.push(id, desc);
-        }
-    }
-
     // 注册工具（每个会话独立的读记录 + console 目录）
     let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
     let tools: Vec<ToolDef> = toolcall::all_tools(
         tool_history.clone(),
         read_tracker,
-        cp_stack.clone(),
         Some(prep.session_dir.clone()),
         Default::default(),
     );
-
-    // ── 每条用户消息后自动打检查点，记录消息位置以便回滚截断 ──
-    auto_checkpoint(&cp_stack, &state.db, &session_id, &req.message, context.len()).await;
 
     // 如果该 session 已有活跃运行，先停止旧标志
     {
@@ -227,7 +214,6 @@ async fn handle_chat(
         state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
         warmup_enabled,
         flags,
-        cp_stack.clone(),
         state.agent_contexts.clone(),
         state.active_runs.clone(),
     );
@@ -284,11 +270,6 @@ fn agent_to_sse(
                 AgentEvent::Error(e) => {
                     yield Ok(Event::default().data(
                         serde_json::to_string(&SseEvent::Error { message: e }).unwrap()
-                    ));
-                }
-                AgentEvent::ContextRollback => {
-                    yield Ok(Event::default().data(
-                        serde_json::to_string(&SseEvent::ContextRollback).unwrap()
                     ));
                 }
                 AgentEvent::Paused => {
@@ -453,16 +434,6 @@ async fn handle_session_state(
     };
     // 给 tool result 填函数名，前端无需再计算
     enrich_tool_names(&mut context);
-    // 合并手动检查点（来自消息历史的 tool_call）+ 自动检查点（来自 DB）
-    let cp_stack = CheckpointStack::rebuild_from_messages(&context);
-    if let Ok(db_cps) = state.db.lock().await.get_checkpoints(&id) {
-        for (cp_id, desc) in db_cps {
-            if !cp_stack.list().iter().any(|c| c.id == cp_id) {
-                cp_stack.push(cp_id, desc);
-            }
-        }
-    }
-    let checkpoints = cp_stack.list();
     // 查询当前 agent 运行状态
     let status = {
         let runs = state.active_runs.lock().await;
@@ -472,7 +443,7 @@ async fn handle_session_state(
             "idle".to_string()
         }
     };
-    Ok(Json(SessionState { context, checkpoints, status }))
+    Ok(Json(SessionState { context, status }))
 }
 
 /// 重命名会话

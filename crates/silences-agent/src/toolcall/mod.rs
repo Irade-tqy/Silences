@@ -14,16 +14,10 @@ pub mod regret;
 pub mod command;
 pub mod trash;
 pub mod rename;
-pub mod checkpoint;
-pub mod rollback;
-pub mod list_checkpoints;
-
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
-
-use crate::checkpoint_stack::CheckpointStack;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -60,14 +54,10 @@ pub struct ToolOutcome {
     pub summary: String,
     /// 用于 regret 的逆操作（None 表示不可撤销）
     pub inverse: Option<InverseOp>,
-    /// 若为 true，agent loop 在此轮工具全部执行后回退消息到 checkpoint
-    pub rollback: bool,
     /// 若设置，表示需要用户审批，值为审批会话 ID
     pub approval_pending: Option<String>,
     /// 工具执行后注入到对话中的额外消息（例如 rollback 注入 orch 指令）
     pub inject_messages: Vec<silences_core::Message>,
-    /// 延迟回退到下一轮（用于 rollback：tool result 指示 LLM 更新 CONTEXT.md，下一轮再截断）
-    pub defer_rollback: bool,
 }
 
 impl ToolOutcome {
@@ -76,10 +66,8 @@ impl ToolOutcome {
         Self {
             summary: summary.into(),
             inverse: None,
-            rollback: false,
             approval_pending: None,
             inject_messages: vec![],
-            defer_rollback: false,
         }
     }
 }
@@ -89,10 +77,8 @@ impl fmt::Debug for ToolOutcome {
         f.debug_struct("ToolOutcome")
             .field("summary", &self.summary)
             .field("inverse", &self.inverse.is_some())
-            .field("rollback", &self.rollback)
             .field("approval_pending", &self.approval_pending.is_some())
             .field("inject_messages", &self.inject_messages.len())
-            .field("defer_rollback", &self.defer_rollback)
             .finish()
     }
 }
@@ -252,7 +238,6 @@ pub(super) fn truncate_head_tok(content: &str, max_tok: usize) -> (String, bool)
 pub fn all_tools(
     history: Arc<Mutex<ToolHistory>>,
     read_tracker: ReadTracker,
-    cp_stack: Arc<CheckpointStack>,
     session_dir: Option<PathBuf>,
     limits: ToolLimits,
 ) -> Vec<ToolDef> {
@@ -271,9 +256,6 @@ pub fn all_tools(
         command::tool(console_dir, limits),
         trash::tool(),
         rename::tool(),
-        checkpoint::tool(cp_stack.clone()),
-        rollback::tool(cp_stack.clone()),
-        list_checkpoints::tool(cp_stack),
     ]
 }
 
@@ -327,10 +309,8 @@ mod tests {
         let outcome = ToolOutcome::new("hello");
         assert_eq!(outcome.summary, "hello");
         assert!(outcome.inverse.is_none());
-        assert!(!outcome.rollback);
         assert!(outcome.approval_pending.is_none());
         assert!(outcome.inject_messages.is_empty());
-        assert!(!outcome.defer_rollback);
     }
 
     // ── InverseOp ──
