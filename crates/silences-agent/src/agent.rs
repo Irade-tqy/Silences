@@ -461,20 +461,20 @@ pub fn run_agent(
             // 注入提示词，让模型以 JSON Output 模式产出 Python 脚本，
             // 脚本接收 messages JSON 通过 stdin，输出优化后的 messages JSON 到 stdout。
             {
-                let ctx_mgmt_prompt = format!(
-                    "你是一个上下文管理器。当前有 {} 条消息。\n\
-                     请输出一个 JSON 对象，包含：\n\
-                     - \"analysis\": 字符串，说明你保留/删除了哪些消息及原因\n\
-                     - \"script\": 一个完整的 Python 3 脚本字符串（用 \\\\n 换行），从 sys.stdin 读取 messages JSON 数组，输出优化后的 messages JSON 数组\n\n\
-                     规则：\n\
-                     - 保留所有 user 和 system 消息\n\
-                     - 压缩重复/冗余的 assistant(tool_calls) 和 tool 消息\n\
-                     - 保留关键结论和工具执行结果，移除纯探索/失败/死胡同的内容\n\
-                     - 输出的 messages 必须是合法 JSON 数组，消息结构与输入一致\n\n\
-                     JSON 输出示例：\n\
-                     {{\"analysis\": \"...\", \"script\": \"import sys,json\\nmsgs=json.load(sys.stdin)\\n...\\njson.dump(result,sys.stdout)\"}}",
-                    messages.len()
-                );
+                let ctx_mgmt_prompt =
+                    "你是一个上下文压缩器。你看到的是 Silences agent 与用户的多轮对话历史，\
+                     包含 system 指令、用户消息、agent 的工具调用和执行结果。\n\n\
+                     你的任务是输出一个更短但信息等价的消息列表。你可以：\n\
+                     - 删除消息\n\
+                     - 把多条消息合并为一条\n\
+                     - 把长内容（如 read 返回的完整文件）替换为简短总结\n\n\
+                     约束：\n\
+                     - 第一条 system 消息和第一条 user 消息保持原样不动（它们对齐 prefix cache）\n\
+                     - 输出必须是合法 JSON 数组，可以被反序列化回 Message 列表\n\
+                     - 不确定是否重要的，保留\n\n\
+                     输出格式：\n\
+                     {\"analysis\": \"<一句话解释你做了什么>\", \"script\": \"<Python 3 代码，stdin 读入 messages JSON，stdout 输出压缩后的 JSON>\"}"
+                        .to_string();
                 let ctx_msg = Message {
                     role: "system".into(),
                     content: ctx_mgmt_prompt,
