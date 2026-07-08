@@ -20,9 +20,21 @@ use silences_lib::{Silences, SilencesConfig};
 
 /// 获取 API key，没有则跳过测试
 fn get_api_key() -> Option<String> {
-    std::env::var("DEEPSEEK_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
+    // 优先从 DB 读取（DB 中维护了最新的有效 key）
+    let db_path = std::env::var("SILENCES_DB_PATH")
+        .unwrap_or_else(|_| "E:/programs/Silences/silences.db".to_string());
+    let p = std::path::PathBuf::from(&db_path);
+    if p.exists() {
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            if let Ok(mut stmt) = conn.prepare("SELECT value FROM settings WHERE key = 'api_key'") {
+                if let Ok(key) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+                    if !key.is_empty() { return Some(key); }
+                }
+            }
+        }
+    }
+    // 再尝试环境变量
+    std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.is_empty())
 }
 
 /// 基准测试的 worktree 路径
@@ -83,6 +95,7 @@ fn save_record(
 }
 
 #[tokio::test]
+#[ignore]
 async fn benchmark_scenario_a_debug_bugs() {
     let api_key = match get_api_key() {
         Some(k) => k,

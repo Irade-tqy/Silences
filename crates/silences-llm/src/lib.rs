@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -99,7 +99,7 @@ impl LlmClient {
             .json(&body)
             .send()
             .await
-            .context("预热请求失败")?;
+            .map_err(|e| anyhow::anyhow!("预热请求失败: {e:#}"))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -270,7 +270,7 @@ impl LlmClient {
             .json(&body)
             .send()
             .await
-            .context("Failed to send chat request")?;
+            .map_err(|e| anyhow::anyhow!("发送聊天请求失败: {e:#}"))?;
 
         let status = response.status();
         if !status.is_success() {
