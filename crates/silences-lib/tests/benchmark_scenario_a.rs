@@ -261,8 +261,8 @@ async fn benchmark_scenario_a_debug_bugs() {
 
     let t0 = std::time::Instant::now();
     let r2 = silences.process_turn(&session_id, prompt2).await;
-    let wall2 = t0.elapsed().as_secs();
-    eprintln!("Bug 2 耗时: {wall2}s");
+    let wall2 = t0.elapsed();
+    eprintln!("[timer] process_turn Bug 2 done @ {:.1}s", wall2.as_secs_f64());
 
     let diff2 = git_diff(&worktree);
     fs::write(record_dir.join("diff_bug2.patch"), &diff2).unwrap();
@@ -311,8 +311,8 @@ async fn benchmark_scenario_a_debug_bugs() {
 
     // ──── 打印报告 ────
     for (label, analysis, wall) in &[
-        ("Bug 1", &analysis1, wall1),
-        ("Bug 2", &analysis2, wall2),
+        ("Bug 1", &analysis1, &wall1),
+        ("Bug 2", &analysis2, &wall2),
     ] {
         println!("\n{}", "=".repeat(55));
         println!("  {label}");
@@ -321,7 +321,7 @@ async fn benchmark_scenario_a_debug_bugs() {
             println!("  ❌ 错误: {}", analysis["error"]);
             continue;
         }
-        println!("  耗时:               {wall}s");
+        println!("  耗时:               {:.1}s", wall.as_secs_f64());
         let u = &analysis["usage"];
         println!("  Token:              in={}, out={}, cache_hit={}",
             u["input_tokens"].as_u64().unwrap_or(0),

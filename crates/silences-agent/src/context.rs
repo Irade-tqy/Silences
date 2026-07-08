@@ -76,7 +76,8 @@ pub fn init_session_context(project_root: &Path, session_id: &str) -> std::io::R
         let tpl = framework_templates.join("SILENCES.md");
         if tpl.exists() {
             let content = std::fs::read_to_string(&tpl)?
-                .replace("{SilencesDataDirectory}", &session_dir.to_string_lossy());
+                .replace("{SilencesDataDirectory}", &session_dir.to_string_lossy())
+                .replace("{ProjectRoot}", &project_root.to_string_lossy());
             std::fs::write(&silences_path, content)?;
         } else {
             fs::write(&silences_path, "")?;

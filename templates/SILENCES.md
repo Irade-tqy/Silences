@@ -36,4 +36,6 @@
 
 ## 项目位置
 
+你正在操作的项目根目录是：{ProjectRoot}
+
 项目的 Silences 数据可以在 {SilencesDataDirectory} 下找到，即 SILENCES.md, CONTEXT.md, .trash 文件夹, console 文件夹等。

@@ -164,6 +164,7 @@ pub fn run_agent(
         let mut messages_changed = true;
 
         for round in 0..usize::MAX {
+            let t_round = std::time::Instant::now();
             // 快照当前上下文供 /state 端点查询（仅在 messages 有变化时写入）
             if messages_changed {
                 {
@@ -261,6 +262,7 @@ pub fn run_agent(
                 usage = Some(u);
             }
 
+            let t_llm_done = std::time::Instant::now();
             // LLM 流完成后、处理结果前允许暂停
             // 如果推理期间收到暂停信号，流正常结束然后暂停，不执行工具
             if flags.should_pause() {
@@ -686,6 +688,17 @@ pub fn run_agent(
             if tool_delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(tool_delay_ms)).await;
             }
+
+            let t_total = t_round.elapsed();
+            let t_llm = t_llm_done - t_round;
+            let t_tools = t_total - t_llm;
+            eprintln!(
+                "[perf] round={round} total={:.1}s llm={:.1}s tools={:.1}s msgs={}",
+                t_total.as_secs_f64(),
+                t_llm.as_secs_f64(),
+                t_tools.as_secs_f64(),
+                messages.len(),
+            );
 
             // 继续下一轮（LLM 看到工具结果后继续）
         }
