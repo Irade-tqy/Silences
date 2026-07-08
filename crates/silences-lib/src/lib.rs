@@ -92,6 +92,7 @@ impl Silences {
     /// 创建新的 Silences 实例
     ///
     /// 打开数据库、初始化 LLM 客户端。
+    /// 如果未指定 system_prompt，会从 DB 的 settings 表中加载（与 server 模式一致）。
     pub fn new(config: SilencesConfig) -> anyhow::Result<Self> {
         let db = Db::open(&config.db_path)?;
 
@@ -102,13 +103,18 @@ impl Silences {
         // warmup_enabled 默认 true（与 server 一致），但允许 caller 显式关闭
         let warmup_enabled = config.warmup_enabled;
 
+        // 如果未指定 system_prompt，自动从 DB 加载（与 server main.rs 一致）
+        let system_prompt = config.system_prompt.or_else(|| {
+            db.get_setting("system_prompt").ok().flatten()
+        });
+
         Ok(Self {
             llm,
             db: Arc::new(Mutex::new(db)),
             tool_histories: StdMutex::new(HashMap::new()),
             agent_contexts: Arc::new(Mutex::new(HashMap::new())),
             project_root: config.project_root,
-            system_prompt: config.system_prompt,
+            system_prompt,
             warmup_enabled,
             tool_limits: config.tool_limits.unwrap_or_default(),
         })

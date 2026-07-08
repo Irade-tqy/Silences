@@ -33,6 +33,12 @@ fn worktree_path() -> PathBuf {
     )
 }
 
+/// 数据库路径（包含系统提示词等配置）
+fn db_path() -> String {
+    std::env::var("SILENCES_DB_PATH")
+        .unwrap_or_else(|_| "E:/programs/Silences/silences.db".to_string())
+}
+
 /// 保存完整记录到 JSON 文件
 fn save_record(
     prompt: &str,
@@ -46,7 +52,7 @@ fn save_record(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let out_dir = PathBuf::from("target").join("bench-record");
+    let out_dir = PathBuf::from("bench-record");
     fs::create_dir_all(&out_dir)?;
 
     let path = out_dir.join(format!("scenario-a-{ts}.json"));
@@ -85,26 +91,49 @@ async fn benchmark_scenario_a_debug_bugs() {
         worktree
     );
 
-    // 1. 创建 Silences 实例，指向 dailyPlanner worktree
-    let silences = Silences::new(SilencesConfig {
-        db_path: ":memory:".to_string(),
+    // 加载 DB 中的系统提示词（与 server 模式一致）
+    let _system_prompt_present = db_path();
+    eprintln!("DB 路径: {}", _system_prompt_present);
+
+    // 切换到 worktree 目录，让 agent 的 glance/grep 探索起点正确
+    let orig_cwd = std::env::current_dir().ok();
+    if let Err(e) = std::env::set_current_dir(&worktree) {
+        panic!("无法切换到 worktree {:?}: {e}", worktree);
+    }
+    eprintln!("CWD 切换到 worktree: {:?}", worktree);
+
+    // 1. 创建 Silences 实例
+    let silences = match Silences::new(SilencesConfig {
+        db_path: db_path(),
         api_key,
         base_url: None,
         model: Some("deepseek-v4-flash".to_string()),
-        system_prompt: None,
+        system_prompt: None, // ← 从 DB 自动加载
         project_root: Some(worktree.clone()),
         tool_limits: None,
         warmup_enabled: false,
-    })
-    .expect("创建 Silences 实例失败");
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            if let Some(cwd) = orig_cwd {
+                let _ = std::env::set_current_dir(&cwd);
+            }
+            panic!("创建 Silences 实例失败: {e}");
+        }
+    };
 
     // 2. Scenario A 初始 prompt
     let prompt = "我用番茄钟，切换了一些页面后切回去，发现系统时钟过了 5 分钟，它才进行了 1 分钟。修一下。";
 
-    // 3. 发送消息给 agent，让它修复 bug
+    // 3. 发送消息给 agent
     let result = silences.process_turn("bench-scenario-a", prompt).await;
 
-    // 4. 根据结果保存记录
+    // 恢复 CWD
+    if let Some(cwd) = orig_cwd {
+        let _ = std::env::set_current_dir(&cwd);
+    }
+
+    // 4. 处理结果
     match result {
         Ok(turn) => {
             let record_path = save_record(
@@ -124,28 +153,67 @@ async fn benchmark_scenario_a_debug_bugs() {
                 );
             }
 
+            // 检查是否使用了 rollback
+            let all_text: String = turn
+                .messages
+                .iter()
+                .map(|m| format!("{}: {}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let has_rollback = all_text.contains("rollback") || all_text.contains("regret");
+
+            // 提取工具调用序列
+            let tool_seq: Vec<String> = turn
+                .messages
+                .iter()
+                .filter_map(|m| {
+                    if m.role == "assistant" {
+                        m.tool_calls.as_ref().map(|tcs| {
+                            tcs.iter()
+                                .map(|tc| tc.function.name.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             println!(
                 "\n✅ process_turn 成功完成！\n\
                  工作区: {:?}\n\
                  记录保存到: {:?}\n\
-                 \n\
-                 agent 回复末尾:\n{}\n\
-                 \n\
-                 请手动检查 worktree 中的文件修改是否正确。",
+                 使用了 rollback/regret: {}\n\
+                 工具调用序列:\n  {}\n",
                 worktree,
                 record_path,
-                turn.reply.chars().rev().take(500).collect::<String>().chars().rev().collect::<String>()
+                if has_rollback { "✅" } else { "❌" },
+                tool_seq.join("\n  "),
             );
 
-            // 这里不做 git diff 断言 —— 由用户亲自检查变动的正确性
+            let reply_tail: String = turn
+                .reply
+                .chars()
+                .rev()
+                .take(300)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            println!("agent 回复末尾:\n{}\n", reply_tail);
         }
         Err(e) => {
             let err_msg = format!("{}", e);
-
-            // 即使失败也保存记录
-            let _record_path = save_record(prompt, "", &Vec::<serde_json::Value>::new(), &None::<serde_json::Value>, &Some(err_msg.clone()), &worktree)
-                .expect("保存失败记录失败");
-
+            let _record_path = save_record(
+                prompt,
+                "",
+                &Vec::<serde_json::Value>::new(),
+                &None::<serde_json::Value>,
+                &Some(err_msg.clone()),
+                &worktree,
+            )
+            .expect("保存失败记录失败");
             panic!("process_turn 失败: {}", err_msg);
         }
     }
