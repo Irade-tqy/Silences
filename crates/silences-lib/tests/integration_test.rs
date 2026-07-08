@@ -16,6 +16,7 @@ fn make_silences() -> Silences {
         project_root: None,
         tool_limits: None,
         warmup_enabled: false,
+        debug_dir: None,
     })
     .unwrap()
 }
@@ -48,6 +49,7 @@ async fn test_new_missing_db_path() -> anyhow::Result<()> {
         project_root: None,
         tool_limits: None,
         warmup_enabled: false,
+        debug_dir: None,
     });
     assert!(result.is_err(), "should fail when parent directory doesn't exist");
     Ok(())
@@ -141,6 +143,7 @@ async fn test_process_turn_empty_api_key() -> anyhow::Result<()> {
         project_root: None,
         tool_limits: None,
         warmup_enabled: false,
+        debug_dir: None,
     })?;
     let result = s.process_turn("test-session", "Hello").await;
     assert!(result.is_err(), "empty API key should cause an error");

@@ -18,6 +18,7 @@
 //!     project_root: Some(PathBuf::from(".")),
 //!     tool_limits: None,
 //!     warmup_enabled: false,
+//!     debug_dir: None,
 //! })?;
 //!
 //! let session_id = silences.create_session().await?;
@@ -59,6 +60,8 @@ pub struct SilencesConfig {
     pub tool_limits: Option<ToolLimits>,
     /// 是否启用 prefix cache 预热
     pub warmup_enabled: bool,
+    /// API 调试日志目录（设为 Some 后记录每次请求体到 api_debug.json）
+    pub debug_dir: Option<PathBuf>,
 }
 
 /// 一轮 process_turn 的结果
@@ -98,7 +101,10 @@ impl Silences {
 
         let base_url = config.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com".to_string());
         let model = config.model.clone().unwrap_or_else(|| "deepseek-v4-flash".to_string());
-        let llm = LlmClient::new(config.api_key.clone(), base_url, model);
+        let mut llm = LlmClient::new(config.api_key.clone(), base_url, model);
+        if let Some(ref dir) = config.debug_dir {
+            llm = llm.with_debug_dir(dir.clone());
+        }
 
         // warmup_enabled 默认 true（与 server 一致），但允许 caller 显式关闭
         let warmup_enabled = config.warmup_enabled;

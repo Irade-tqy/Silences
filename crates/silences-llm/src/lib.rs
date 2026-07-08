@@ -279,11 +279,29 @@ impl LlmClient {
         }
 
         let byte_stream = Box::pin(response.bytes_stream());
+
+        // 获取递增序号用于捕获文件命名
+        let call_seq = {
+            let seq_path = self.debug_dir.as_ref().map(|d| d.join("_call_seq.txt"));
+            if let Some(ref p) = seq_path {
+                let prev = std::fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0);
+                let next = prev + 1;
+                let _ = std::fs::write(p, next.to_string());
+                next
+            } else {
+                0
+            }
+        };
+
         Ok(ChatStream {
             byte_stream,
             line_buf: String::new(),
             usage: None,
             ended: false,
+            request_body: body,
+            capture_dir: self.debug_dir.clone(),
+            captured_deltas: Vec::new(),
+            call_seq,
         })
     }
 }
@@ -308,6 +326,11 @@ pub struct ChatStream {
     line_buf: String,
     usage: Option<TokenUsage>,
     ended: bool,
+    // 响应捕获（配对请求体 + 响应事件 + usage）
+    request_body: Value,
+    capture_dir: Option<PathBuf>,
+    captured_deltas: Vec<Value>,
+    call_seq: u32,
 }
 
 impl ChatStream {
@@ -349,14 +372,18 @@ impl ChatStream {
                 if let Some(choices) = val.get("choices").and_then(Value::as_array) {
                     for choice in choices {
                         if let Some(delta) = choice.get("delta") {
-                            if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
+                if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
                                 if !r.is_empty() {
-                                    return Ok(Some(StreamDelta::Reasoning(r.to_string())));
+                                    let delta = StreamDelta::Reasoning(r.to_string());
+                                    self.record_delta(&delta);
+                                    return Ok(Some(delta));
                                 }
                             }
                             if let Some(c) = delta.get("content").and_then(Value::as_str) {
                                 if !c.is_empty() {
-                                    return Ok(Some(StreamDelta::Text(c.to_string())));
+                                    let delta = StreamDelta::Text(c.to_string());
+                                    self.record_delta(&delta);
+                                    return Ok(Some(delta));
                                 }
                             }
                             if let Some(tc_array) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -372,7 +399,9 @@ impl ChatStream {
                                         .and_then(Value::as_str)
                                         .unwrap_or("")
                                         .to_string();
-                                    return Ok(Some(StreamDelta::ToolCall { index, id, name, arguments }));
+                                    let delta = StreamDelta::ToolCall { index, id, name, arguments };
+                                    self.record_delta(&delta);
+                                    return Ok(Some(delta));
                                 }
                             }
                         }
@@ -409,7 +438,88 @@ impl ChatStream {
     }
 
     pub fn take_usage(&mut self) -> Option<TokenUsage> {
-        self.usage.take()
+        let usage = self.usage.take();
+
+        // 流结束：将配对请求+响应写入捕获文件
+        if let Some(ref dir) = self.capture_dir {
+            // 收集完整的响应事件（去重，仅记录非 reasoning 结论）
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut tool_calls: Vec<Value> = Vec::new();
+            for entry in &self.captured_deltas {
+                match entry["type"].as_str() {
+                    Some("text") => text_parts.push(entry["content"].as_str().unwrap_or("").to_string()),
+                    Some("tool_call") => {
+                        let idx = tool_calls.iter().position(|t| t["index"] == entry["index"]);
+                        if let Some(i) = idx {
+                            // 追加 arguments
+                            if let Some(args) = entry["function"]["arguments"].as_str() {
+                                if let Some(existing) = tool_calls[i]["function"]["arguments"].as_str() {
+                                    let merged = format!("{existing}{args}");
+                                    tool_calls[i]["function"]["arguments"] = json!(merged);
+                                }
+                            }
+                            if let Some(id) = entry["id"].as_str() {
+                                if tool_calls[i]["id"].is_null() {
+                                    tool_calls[i]["id"] = json!(id);
+                                }
+                            }
+                            if let Some(name) = entry["function"]["name"].as_str() {
+                                if tool_calls[i]["function"]["name"].is_null() {
+                                    tool_calls[i]["function"]["name"] = json!(name);
+                                }
+                            }
+                        } else {
+                            tool_calls.push(entry.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let record = json!({
+                "call_seq": self.call_seq,
+                "request": self.request_body,
+                "response": {
+                    "text": text_parts.join(""),
+                    "tool_calls": tool_calls,
+                    "usage": usage,
+                },
+                "captured_deltas": self.captured_deltas,
+            });
+
+            // 保存到配对日志文件
+            let pair_path = dir.join("api_pairs.jsonl");
+            if let Ok(line) = serde_json::to_string(&record) {
+                use std::io::Write;
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&pair_path)
+                    .map(|mut f| {
+                        let _ = writeln!(f, "{line}");
+                    });
+            }
+        }
+
+        usage
+    }
+
+    /// 记录响应 delta 到 captured_deltas
+    fn record_delta(&mut self, delta: &StreamDelta) {
+        let entry = match delta {
+            StreamDelta::Text(t) => json!({"type": "text", "content": t}),
+            StreamDelta::Reasoning(r) => json!({"type": "reasoning", "content": r}),
+            StreamDelta::ToolCall { index, id, name, arguments } => json!({
+                "type": "tool_call",
+                "index": index,
+                "id": id,
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                }
+            }),
+        };
+        self.captured_deltas.push(entry);
     }
 }
 

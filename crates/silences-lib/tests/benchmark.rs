@@ -102,6 +102,7 @@ async fn benchmark_scenarios() {
         project_root: Some(worktree.clone()),
         tool_limits: None,
         warmup_enabled: false,
+        debug_dir: None,
     }).expect("创建 Silences 实例失败");
 
     let orig_cwd = std::env::current_dir().ok();
