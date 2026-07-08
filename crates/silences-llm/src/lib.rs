@@ -255,10 +255,8 @@ impl LlmClient {
             body["tools"] = json!(t);
         }
 
-        // 调试日志：写请求体到文件，只保留最近 100 条
-        if let Some(ref dir) = self.debug_dir {
-            log_api_request(dir, &body);
-        }
+        // 不再写 api_debug.json（全量读写 O(n²) I/O），
+        // api_pairs.jsonl（req+res 配对，append-only）已在 take_usage() 中写入。
 
         let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
         let api_key = self.api_key.read().map(|k| k.clone()).unwrap_or_else(|_| String::new());
@@ -280,14 +278,11 @@ impl LlmClient {
 
         let byte_stream = Box::pin(response.bytes_stream());
 
-        // 获取递增序号用于捕获文件命名
+        // 递增序号（内存原子计数器，避免每轮读写文件）
         let call_seq = {
-            let seq_path = self.debug_dir.as_ref().map(|d| d.join("_call_seq.txt"));
-            if let Some(ref p) = seq_path {
-                let prev = std::fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0);
-                let next = prev + 1;
-                let _ = std::fs::write(p, next.to_string());
-                next
+            static NEXT_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+            if self.debug_dir.is_some() {
+                NEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             } else {
                 0
             }
