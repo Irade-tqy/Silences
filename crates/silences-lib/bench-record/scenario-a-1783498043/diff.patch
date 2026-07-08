@@ -1,0 +1,62 @@
+diff --git a/components/pomodoro/PomodoroTimer.tsx b/components/pomodoro/PomodoroTimer.tsx
+index 9edbd8f..e1aeb71 100644
+--- a/components/pomodoro/PomodoroTimer.tsx
++++ b/components/pomodoro/PomodoroTimer.tsx
+@@ -109,8 +109,17 @@ export default function PomodoroTimer({
+     const [summary, setSummary] = useState("");
+ 
+     const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+-    /// 记录上一次 tick 的真实时间戳，用于计算实际流逝秒数（解决切换页面后 setInterval 被节流的问题）
++    /// 记录上一次 tick 的真实时间戳，用于计算实际流逝秒数
+     const lastTickRef = useRef<number | null>(null);
++    /// ref 同步 state 值，供 compensate 闭包使用（不受 useEffect 闭包过时问题影响）
++    const sessionStartRef = useRef<number | null>(null);
++    const totalPauseMsRef = useRef(0);
++    const totalTimeRef = useRef(focusMinutes * 60);
++
++    // 每次渲染同步 ref
++    sessionStartRef.current = sessionStart;
++    totalPauseMsRef.current = totalPauseMs;
++    totalTimeRef.current = totalTime;
+ 
+     // ----- 计时器核心 -----
+ 
+@@ -195,17 +204,24 @@ export default function PomodoroTimer({
+ 
+     // ----- 页面可见性变化时补偿流逝时间 -----
+     // 浏览器在后台标签页会暂停 setInterval，靠 tick 补偿来不及。
+-    // 页面回到前台时立即计算实际流逝的秒数，一次性扣减。
++    // 页面回到前台时，基于 sessionStart 和 totalPauseMs 用绝对时间校正，
++    // 不受后台 tick 行为影响。
+ 
+     useEffect(() => {
+         const compensate = () => {
+             if (document.visibilityState === "visible" && lastTickRef.current !== null) {
+-                const now = Date.now();
+-                const elapsed = Math.floor((now - lastTickRef.current) / 1000);
+-                if (elapsed > 0) {
+-                    setTimeLeft((prev) => Math.max(0, prev - elapsed));
++                const ss = sessionStartRef.current;
++                const tp = totalPauseMsRef.current;
++                if (ss !== null) {
++                    // 用绝对时间计算正确的剩余秒数
++                    const elapsedMs = Date.now() - ss - tp;
++                    const correctTimeLeft = Math.max(
++                        0,
++                        totalTimeRef.current - Math.floor(elapsedMs / 1000)
++                    );
++                    setTimeLeft(correctTimeLeft);
+                 }
+-                lastTickRef.current = now;
++                lastTickRef.current = Date.now();
+             }
+         };
+ 
+@@ -219,7 +235,6 @@ export default function PomodoroTimer({
+         };
+         // eslint-disable-next-line react-hooks/exhaustive-deps
+     }, []);
+-
+     // ----- 自动持久化（非 idle 时保存） -----
+ 
+     useEffect(() => {
