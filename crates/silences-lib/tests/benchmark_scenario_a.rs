@@ -10,7 +10,7 @@
 //! 运行：cargo test --test benchmark_scenario_a -- --nocapture --ignored
 //!
 //! 输出：bench-record/scenario-a-{ts}/
-//!   diff.patch / raw_messages.json / api_pairs.json / result.json / db.sqlite
+//!   raw_messages.json / api_pairs.json / result.json / db.sqlite
 
 use std::fs;
 use std::path::PathBuf;
@@ -60,18 +60,6 @@ fn worktree_path() -> PathBuf {
     )
 }
 
-fn git_diff(repo: &PathBuf) -> String {
-    let out = Command::new("git").args(["diff", "HEAD"]).current_dir(repo).output()
-        .expect("git diff HEAD 失败");
-    String::from_utf8_lossy(&out.stdout).to_string()
-}
-
-fn git_diff_stat(repo: &PathBuf) -> String {
-    let out = Command::new("git").args(["diff", "HEAD", "--stat"]).current_dir(repo).output()
-        .expect("git diff HEAD --stat 失败");
-    String::from_utf8_lossy(&out.stdout).to_string()
-}
-
 fn reset_worktree(worktree: &PathBuf) {
     let s = Command::new("git").args(["checkout", "--", "."])
         .current_dir(worktree).status().expect("git checkout 失败");
@@ -85,7 +73,7 @@ fn read_raw_messages(db_path: &str, session_id: &str) -> Vec<serde_json::Value> 
         Err(e) => { eprintln!("打开 DB 失败: {e}"); return vec![]; }
     };
     let mut stmt = match conn.prepare(
-        "SELECT id, role, content, name, tool_calls, tool_call_id, hidden, created_at
+        "SELECT id, role, content, name, tool_calls, tool_call_id
          FROM messages WHERE session_id = ?1 ORDER BY id ASC"
     ) {
         Ok(s) => s,
@@ -95,13 +83,29 @@ fn read_raw_messages(db_path: &str, session_id: &str) -> Vec<serde_json::Value> 
         Ok(serde_json::json!({
             "id": row.get::<_, i64>(0)?,
             "role": row.get::<_, String>(1)?,
-            "content_preview": row.get::<_, String>(2)?.chars().take(200).collect::<String>(),
+            "content": row.get::<_, String>(2)?,
             "name": row.get::<_, Option<String>>(4)?,
             "tool_calls": row.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
             "tool_call_id": row.get::<_, Option<String>>(6)?,
         }))
     }) { Ok(r) => r, Err(_) => return vec![] };
     rows.filter_map(|r| r.ok()).collect()
+}
+
+/// 检查源文件是否包含 Bug 1/2 修复标记
+fn check_source_fix(worktree: &PathBuf) -> (bool, bool) {
+    let path = worktree.join("components/pomodoro/PomodoroTimer.tsx");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (false, false),
+    };
+    // Bug 1: tick 基于 Date.now() 做绝对时间计算，不是增量 setTimeLeft(prev => ...)
+    let has_bug1 = content.contains("elapsedMs")
+        && (content.contains("sessionStartRef") || content.contains("totalPauseMsRef"));
+    // Bug 2: startTimer 中 setSessionStart(Date.now()) 重置时间起点
+    let has_bug2 = content.contains("setSessionStart(Date.now())")
+        || (content.contains("setSessionStart(") && content.contains("Date.now()"));
+    (has_bug1, has_bug2)
 }
 
 fn read_api_pairs(path: &PathBuf) -> Vec<serde_json::Value> {
@@ -118,43 +122,17 @@ fn analyze_turn(
 ) -> serde_json::Value {
     let api_pairs = read_api_pairs(pair_path);
 
-    // 从 api_pairs 统计工具调用（不依赖 DB，DB 可能不完整）
-    let mut edit_n = 0usize; let mut cp_n = 0usize; let mut rb_n = 0usize;
-    let mut read_n = 0usize; let mut glance_n = 0usize; let mut regret_n = 0usize;
-    let mut find_n = 0usize; let mut grep_n = 0usize; let mut command_n = 0usize;
-    let mut block_edit_n = 0usize;
-    let mut tool_seq: Vec<String> = Vec::new();
-
-    for pair in &api_pairs {
-        let resp = &pair["response"];
-        if let Some(tcs) = resp["tool_calls"].as_array() {
-            for tc in tcs {
-                let name = tc["function"]["name"].as_str().unwrap_or("?").to_string();
-                tool_seq.push(name.clone());
-                match name.as_str() {
-                    "edit" => edit_n += 1,
-                    "block_edit" => block_edit_n += 1,
-                    "checkpoint" => cp_n += 1,
-                    "rollback" => rb_n += 1,
-                    "read" => read_n += 1,
-                    "glance" => glance_n += 1,
-                    "regret" => regret_n += 1,
-                    "find" => find_n += 1,
-                    "grep" => grep_n += 1,
-                    "command" => command_n += 1,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // 每轮摘要
+    // 从 api_pairs 统计工具调用（比 raw_messages 准确，raw_messages 格式可能被截断）
+    let mut tool_counts = std::collections::HashMap::new();
     let mut rounds = Vec::new();
     for (i, pair) in api_pairs.iter().enumerate() {
         let resp = &pair["response"];
         let tcs: Vec<&str> = resp["tool_calls"].as_array()
             .map(|a| a.iter().filter_map(|tc| tc["function"]["name"].as_str()).collect())
             .unwrap_or_default();
+        for name in &tcs {
+            *tool_counts.entry(name.to_string()).or_insert(0) += 1;
+        }
         let has_reasoning = pair["captured_deltas"].as_array().map_or(false, |d| {
             d.iter().any(|e| e["type"] == "reasoning")
         });
@@ -165,20 +143,22 @@ fn analyze_turn(
         }));
     }
 
-    let diff = git_diff(worktree);
-    let has_bug1 = diff.contains("sessionStartRef") || diff.contains("elapsedMs") || diff.contains("Date.now()");
-    let has_bug2 = diff.contains("setSessionStart");
+    let (has_bug1, has_bug2) = check_source_fix(worktree);
 
     serde_json::json!({
         "label": label,
         "api_calls": api_pairs.len(),
         "tools": {
-            "total": tool_seq.len(),
-            "edit": edit_n, "block_edit": block_edit_n,
-            "checkpoint": cp_n, "rollback": rb_n,
-            "read": read_n, "glance": glance_n, "regret": regret_n,
-            "find": find_n, "grep": grep_n, "command": command_n,
-            "sequence": tool_seq,
+            "total": tool_counts.values().sum::<usize>(),
+            "edit": tool_counts.get("edit").unwrap_or(&0),
+            "checkpoint": tool_counts.get("checkpoint").unwrap_or(&0),
+            "rollback": tool_counts.get("rollback").unwrap_or(&0),
+            "read": tool_counts.get("read").unwrap_or(&0),
+            "glance": tool_counts.get("glance").unwrap_or(&0),
+            "regret": tool_counts.get("regret").unwrap_or(&0),
+            "block_edit": tool_counts.get("block_edit").unwrap_or(&0),
+            "command": tool_counts.get("command").unwrap_or(&0),
+            "counts": tool_counts,
         },
         "rounds": rounds,
         "turn_reply_tail": turn.reply.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
@@ -186,7 +166,6 @@ fn analyze_turn(
         "truncated_has_rollback": turn.messages.iter().any(|m| {
             m.tool_calls.as_ref().map_or(false, |tcs| tcs.iter().any(|tc| tc.function.name == "rollback"))
         }),
-        "diff_stat": git_diff_stat(worktree).trim().to_string(),
         "has_bug1": has_bug1,
         "has_bug2": has_bug2,
     })
@@ -254,11 +233,7 @@ async fn benchmark_scenario_a_debug_bugs() {
 
     let pair_path1 = debug_dir.join("api_pairs.jsonl");
 
-    // 保存 Bug 1 diff（不重置 worktree，Bug 2 在 Bug 1 基础上继续）
     let t_analysis = std::time::Instant::now();
-    let diff1 = git_diff(&worktree);
-    fs::write(record_dir.join("diff_bug1.patch"), &diff1).unwrap();
-
     let analysis1 = match r1 {
         Ok(ref turn) => analyze_turn(turn, &pair_path1, &worktree, "Bug 1"),
         Err(ref e) => serde_json::json!({"label": "Bug 1", "error": format!("{e:#}")}),
@@ -277,9 +252,6 @@ async fn benchmark_scenario_a_debug_bugs() {
     let r2 = silences.process_turn(&session_id, prompt2).await;
     let wall2 = t0.elapsed();
     eprintln!("[timer] process_turn Bug 2 done @ {:.1}s", wall2.as_secs_f64());
-
-    let diff2 = git_diff(&worktree);
-    fs::write(record_dir.join("diff_bug2.patch"), &diff2).unwrap();
 
     let analysis2 = match r2 {
         Ok(ref turn) => {
@@ -311,8 +283,6 @@ async fn benchmark_scenario_a_debug_bugs() {
         record_dir.join("raw_messages.json"),
         serde_json::to_string_pretty(&raw_msgs).unwrap(),
     ).unwrap();
-    fs::write(record_dir.join("diff_final.patch"), &diff2).unwrap();
-
     let result = serde_json::json!({
         "scenario": "A (Debug B1+B2)",
         "timestamp_sec": ts,
@@ -349,11 +319,9 @@ async fn benchmark_scenario_a_debug_bugs() {
         println!("  Bug 1 修复标记:     {}", if analysis["has_bug1"].as_bool() == Some(true) { "✅" } else { "❌" });
         println!("  Bug 2 修复标记:     {}", if analysis["has_bug2"].as_bool() == Some(true) { "✅" } else { "❌" });
         println!("  截断消息有 rollback: {}", if analysis["truncated_has_rollback"].as_bool() == Some(true) { "✅" } else { "❌" });
-        println!("  diff_stat:          {}", analysis["diff_stat"].as_str().unwrap_or("(空)"));
         println!("  回复末尾:           {}", analysis["turn_reply_tail"].as_str().unwrap_or(""));
     }
 
     println!("\n📁 记录保存到: {:?}", record_dir);
     println!("  - result.json / api_pairs.json / raw_messages.json / db.sqlite");
-    println!("  - diff_bug1.patch / diff_bug2.patch / diff_final.patch");
 }
