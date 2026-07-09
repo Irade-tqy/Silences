@@ -302,7 +302,7 @@ impl LlmClient {
 
     /// 非流式 JSON Output 调用（用于上下文管理等结构化输出场景）
     ///
-    /// 使用 response_format: json_object，不支持 thinking 模式。
+    /// 使用 response_format: json_object。
     /// 传入 tools schema 仅用于 prefix cache 对齐（模型被指示不调用工具）。
     pub async fn chat_json(
         &self,
@@ -310,6 +310,7 @@ impl LlmClient {
         system: Option<&str>,
         tools: Option<Vec<Value>>,
         max_tokens: u32,
+        thinking: bool,
     ) -> Result<Value> {
         let api_messages = Self::build_api_messages(messages, system);
 
@@ -320,6 +321,9 @@ impl LlmClient {
             "response_format": { "type": "json_object" },
             "max_tokens": max_tokens,
         });
+        if thinking {
+            body["thinking"] = json!({"type": "enabled"});
+        }
         // 传 tools schema 吃缓存，但不期望模型调用
         if let Some(t) = tools {
             body["tools"] = json!(t);
