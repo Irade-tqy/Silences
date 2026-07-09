@@ -13,6 +13,10 @@ export interface TokenUsage {
   cost_yuan: number;
 }
 
+export interface SurgeryRequest {
+  prompt: string;
+}
+
 export interface ToolCallEntry {
   id?: string;
   name: string;
@@ -64,13 +68,7 @@ export interface RawMessage {
   tool_call_id?: string;
 }
 
-export interface CheckpointItem {
-  id: string;
-  description: string;
-}
-
 export interface SessionState {
   context: RawMessage[];
-  checkpoints: CheckpointItem[];
   status: string;
 }

@@ -1654,3 +1654,94 @@ html, body {
 .ctx-item.ctx-danger:hover {
   background: rgba(242,90,90,0.12);
 }
+
+/* ── 手术刀面板 ── */
+
+.surgery-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.surgery-input-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--ds-border-l1);
+  margin-bottom: 8px;
+}
+
+.surgery-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--ds-border-l2);
+  border-radius: 6px;
+  background: var(--ds-bg-tertiary);
+  color: var(--ds-label-primary);
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color var(--ds-duration) var(--ds-ease);
+}
+.surgery-input:focus {
+  border-color: var(--ds-accent);
+}
+.surgery-input::placeholder {
+  color: var(--ds-label-caption);
+}
+.surgery-input:disabled {
+  opacity: 0.6;
+}
+
+.surgery-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.surgery-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity var(--ds-duration) var(--ds-ease);
+  flex: 1;
+}
+.surgery-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.surgery-btn-primary {
+  background: var(--ds-accent);
+  color: #fff;
+}
+.surgery-btn-primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.surgery-btn-secondary {
+  background: var(--ds-interactive-secondary);
+  color: var(--ds-label-primary);
+}
+.surgery-btn-secondary:hover:not(:disabled) {
+  background: var(--ds-interactive-hover);
+}
+
+.surgery-status {
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--ds-label-caption);
+  text-align: center;
+}
+
+.surgery-error {
+  color: var(--ds-state-error);
+}
+
+.surgery-context-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

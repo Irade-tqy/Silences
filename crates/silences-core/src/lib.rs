@@ -287,6 +287,12 @@ pub enum SseEvent {
     Error { message: String },
 }
 
+/// 手术刀 Agent 请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurgeryRequest {
+    pub prompt: String,
+}
+
 /// 聊天响应（SSE 流结束后 server 也返回 JSON，包含 session_id 和 usage）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {

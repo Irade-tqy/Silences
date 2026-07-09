@@ -72,6 +72,13 @@ impl Db {
                 updated_at  TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS surgery_waits (
+                session_id      TEXT PRIMARY KEY,
+                condition       TEXT NOT NULL,
+                messages_snapshot TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            );
+
             ",
         )?;
         Ok(())
@@ -224,6 +231,57 @@ impl Db {
             rusqlite::params![session_id, name],
         )?;
         Ok(())
+    }
+
+    // ── 手术刀 wait 状态 ──
+
+    /// 保存 wait 状态（持久化，server 重启后恢复）
+    pub fn save_surgery_wait(&self, session_id: &str, condition: &str, snapshot: &[Message]) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let json = serde_json::to_string(snapshot)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO surgery_waits (session_id, condition, messages_snapshot, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, condition, json, now],
+        )?;
+        Ok(())
+    }
+
+    /// 读取 wait 状态
+    pub fn get_surgery_wait(&self, session_id: &str) -> Result<Option<(String, Vec<Message>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT condition, messages_snapshot FROM surgery_waits WHERE session_id = ?1",
+        )?;
+        let result = stmt.query_row(rusqlite::params![session_id], |row| {
+            let condition: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            let messages: Vec<Message> = serde_json::from_str(&json)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            Ok((condition, messages))
+        });
+        match result {
+            Ok(pair) => Ok(Some(pair)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 删除 wait 状态（条件达成或取消时）
+    pub fn delete_surgery_wait(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM surgery_waits WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// 列出所有 pending 的 wait
+    pub fn list_pending_waits(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM surgery_waits",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let ids: Vec<String> = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     // ── Token 用量 ──

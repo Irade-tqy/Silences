@@ -19,9 +19,11 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use silences_agent::agent::{run_agent, AgentEvent, prepare_agent_context};
+use silences_agent::context as agent_context;
+use silences_agent::surgery;
 use silences_agent::toolcall::regret::ToolHistory;
 use silences_agent::toolcall::{self, ReadTracker, ToolDef};
-use silences_core::{ChatRequest, Message, RunFlags, Session, SessionState, SetStateRequest, Settings, SettingsUpdate, SseEvent, ViewMessage, messages_to_view};
+use silences_core::{ChatRequest, Message, RunFlags, Session, SessionState, SetStateRequest, Settings, SettingsUpdate, SurgeryRequest, SseEvent, ViewMessage, messages_to_view};
 use silences_db::Db;
 use silences_llm::LlmClient;
 use tokio::sync::Mutex;
@@ -52,6 +54,8 @@ struct AppState {
     warmup_enabled: AtomicBool,
     /// 每个会话最后一次发给 LLM 的 messages 快照
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
+    /// 手术刀 wait 状态（每个会话一个，手术刀 Agent ↔ 主 Agent 同步）
+    surgery_waits: Arc<Mutex<HashMap<String, Arc<Mutex<Option<surgery::WaitState>>>>>>,
 }
 
 /// 流包装器：在 client 断开时不从 active_runs 中移除停止标志
@@ -104,6 +108,12 @@ pub async fn serve(
         .map(|v| v != 0)
         .unwrap_or(true);
 
+    // 启动时检查之前未完成的 wait
+    let pending_waits = db.list_pending_waits().ok().unwrap_or_default();
+    if !pending_waits.is_empty() {
+        eprintln!("[serve] 发现 {} 个未完成的 wait，已在 DB 中持久化", pending_waits.len());
+    }
+
     let state = Arc::new(AppState {
         llm,
         db: Arc::new(Mutex::new(db)),
@@ -114,6 +124,7 @@ pub async fn serve(
         tool_delay_ms: AtomicU64::new(tool_delay_ms),
         warmup_enabled: AtomicBool::new(warmup_enabled),
         agent_contexts: Arc::new(Mutex::new(HashMap::new())),
+        surgery_waits: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -125,6 +136,7 @@ pub async fn serve(
         .route("/sessions/{id}/rename", put(handle_rename_session))
         .route("/sessions/{id}", delete(handle_delete_session))
         .route("/sessions/{id}/set_state", post(handle_set_state))
+        .route("/sessions/{id}/surgery", post(handle_surgery))
         .route("/settings", get(handle_get_settings))
         .route("/settings", put(handle_put_settings))
         .layer(CorsLayer::permissive())
@@ -216,6 +228,7 @@ async fn handle_chat(
         flags,
         state.agent_contexts.clone(),
         state.active_runs.clone(),
+        None,  // 主 Agent 默认不携带 wait 状态，由 handle_surgery 设置
     );
 
     // 将 AgentEvent 转换为 SSE Event
@@ -517,6 +530,224 @@ async fn handle_set_state(
         }
         _ => Err((StatusCode::BAD_REQUEST, format!("未知动作: {}", req.action))),
     }
+}
+
+/// 处理手术刀 Agent 请求
+///
+/// 启动一个独立的 Agent 循环，使用全部标准工具 + wait 工具。
+/// Agent 的操作对象是 context.json，用标准 read/write 工具直接读写。
+/// 每次工具执行后自动同步 context.json → DB。
+async fn handle_surgery(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SurgeryRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, axum::Error>>>, (StatusCode, String)> {
+    // 读取 SILENCES.md
+    let session_dir = state.project_root.as_deref()
+        .map(|root| agent_context::session_context_dir(root, &id));
+    let silences_md = session_dir.as_ref()
+        .and_then(|d| agent_context::read_silences_md(d))
+        .unwrap_or_default();
+
+    // 构建手术刀 Agent 的消息
+    let system_prompt = state.system_prompt.lock().ok()
+        .and_then(|sp| sp.clone());
+    let messages = surgery::build_surgery_messages(
+        system_prompt.as_deref(),
+        &silences_md,
+        &req.prompt,
+    );
+
+    // 获取工具历史
+    let tool_history = {
+        let mut histories = state.agent_histories.lock().await;
+        histories
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(ToolHistory::new(5))))
+            .clone()
+    };
+
+    // 注册工具（标准工具 + wait）
+    let read_tracker: ReadTracker = Arc::new(Mutex::new(HashSet::new()));
+    let base_tools = toolcall::all_tools(
+        tool_history.clone(),
+        read_tracker,
+        session_dir.clone(),
+        Default::default(),
+    );
+    // 初始化 surgery_waits 条目
+    let wait_state = {
+        let mut sw = state.surgery_waits.lock().await;
+        sw.entry(id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    };
+    let tools = surgery::surgery_tools(base_tools, wait_state.clone());
+
+    // 暂停主 Agent
+    {
+        let runs = state.active_runs.lock().await;
+        if let Some(flags) = runs.get(&id) {
+            flags.signal_pause();
+        }
+    }
+
+    // 创建手术刀 Agent 的运行标志
+    let flags = Arc::new(RunFlags::new());
+    {
+        let mut runs = state.active_runs.lock().await;
+        runs.insert(id.clone(), flags.clone());
+    }
+
+    let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
+
+    // 启动手术刀 Agent 循环
+    let agent_stream = run_agent(
+        state.llm.clone_for_agent(),
+        tools,
+        messages,
+        system_prompt.clone(),
+        tool_history,
+        Arc::clone(&state.db),
+        id.clone(),
+        session_dir.clone(),
+        state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
+        warmup_enabled,
+        flags,
+        state.agent_contexts.clone(),
+        state.active_runs.clone(),
+        None,  // 手术刀 Agent 自身不检查 wait（wait 由主 Agent 检查）
+    );
+
+    // 包装流：工具执行后同步 context.json
+    let sse_stream = surgery_agent_to_sse(
+        agent_stream, id.clone(), session_dir, state.db.clone(), state.agent_contexts.clone()
+    );
+
+    let sse_stream = CleanupStream {
+        inner: sse_stream,
+        session_id: id.clone(),
+    };
+
+    Ok(Sse::new(sse_stream))
+}
+
+/// 将手术刀 Agent 的事件流转换为 SSE 事件流，并在工具执行后同步 context.json
+fn surgery_agent_to_sse(
+    agent_stream: ReceiverStream<AgentEvent>,
+    session_id: String,
+    session_dir: Option<PathBuf>,
+    db: Arc<Mutex<Db>>,
+    agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
+) -> Pin<Box<dyn Stream<Item = Result<Event, axum::Error>> + Send>> {
+    Box::pin(async_stream::stream! {
+        use tokio_stream::StreamExt;
+        let mut stream = agent_stream;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::ToolCall { ref name, ref result, .. } => {
+                    // 工具执行完成后，同步 context.json
+                    if result.is_some() && name != "wait" {
+                        if let Some(ref dir) = session_dir {
+                            sync_context_json(dir, &session_id, &db, &agent_contexts);
+                        }
+                    }
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::ToolCall {
+                            id: String::new(),
+                            name: name.clone(),
+                            args: String::new(),
+                            result: result.clone(),
+                        }).unwrap()
+                    ));
+                }
+                AgentEvent::Text(_) | AgentEvent::Reasoning(_) => {
+                    // 前端不渲染 text/reasoning
+                }
+                AgentEvent::Session(s) => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Session { id: s }).unwrap()
+                    ));
+                }
+                AgentEvent::Usage(u) => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Usage(u)).unwrap()
+                    ));
+                }
+                AgentEvent::MessageBoundary => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::MessageBoundary).unwrap()
+                    ));
+                }
+                AgentEvent::Paused => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Paused).unwrap()
+                    ));
+                }
+                AgentEvent::Resumed => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Resumed).unwrap()
+                    ));
+                }
+                AgentEvent::Error(e) => {
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&SseEvent::Error { message: e }).unwrap()
+                    ));
+                }
+            }
+        }
+    })
+}
+
+/// 同步 context.json 到 DB + 内存快照
+fn sync_context_json(
+    session_dir: &std::path::Path,
+    session_id: &str,
+    db: &Arc<Mutex<Db>>,
+    agent_contexts: &Arc<Mutex<HashMap<String, Vec<Message>>>>,
+) {
+    let ctx_path = session_dir.join("context.json");
+    if !ctx_path.exists() {
+        return;
+    }
+
+    // 1. 读取
+    let content = match std::fs::read_to_string(&ctx_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[surgery] 读取 context.json 失败: {e}");
+            return;
+        }
+    };
+    let raw: Vec<serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[surgery] 解析 context.json 失败: {e}");
+            return;
+        }
+    };
+
+    // 2. 标准化
+    let normalized = surgery::normalize_messages(raw);
+
+    // 3. 写回 context.json（标准化后的版本）
+    if let Ok(json) = serde_json::to_string_pretty(&normalized) {
+        let _ = std::fs::write(&ctx_path, &json);
+    }
+
+    // 4. 同步到 DB + 内存快照
+    let rt = tokio::runtime::Handle::current();
+    rt.block_on(async {
+        let db_lock = db.lock().await;
+        // 删除 session 的所有旧消息
+        // 注意：不能直接 delete_all，需要保留其他方式插入的消息
+        // 更安全的做法：只更新 context_snapshot，因为 context.json 不一定是 message 表的一致副本
+        let _ = db_lock.save_context_snapshot(session_id, &normalized);
+
+        let mut ctx_map = agent_contexts.lock().await;
+        ctx_map.insert(session_id.to_string(), normalized);
+    });
 }
 
 /// 掩盖 API key：只显示前4位+后4位

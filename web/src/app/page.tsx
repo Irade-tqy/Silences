@@ -97,6 +97,17 @@ export default function Page() {
     return () => clearInterval(interval);
   }, [activeId, loading, apiBase]);
 
+  // 手术刀工具执行后刷新上下文
+  const handleContextUpdated = useCallback(() => {
+    if (!activeId) return;
+    (async () => {
+      try {
+        const res = await fetch(`${apiBase}/sessions/${activeId}/state`);
+        if (res.ok) setSessionState(await res.json());
+      } catch (e) { console.warn('surgery 刷新状态失败:', e); }
+    })();
+  }, [activeId, apiBase]);
+
   const handleContextMenu = useCallback((e: React.MouseEvent, sid: string) => {
     e.preventDefault();
     const menuW = 150;
@@ -491,6 +502,9 @@ export default function Page() {
           sessionState={sessionState}
           collapsedCtxCards={collapsedCtxCards}
           setCollapsedCtxCards={setCollapsedCtxCards}
+          apiBase={apiBase}
+          activeId={activeId}
+          onContextUpdated={handleContextUpdated}
         />
 
         {/* ─── 手机端页面栈 ─── */}
@@ -575,6 +589,9 @@ export default function Page() {
                 sessionState={sessionState}
                 collapsedCtxCards={collapsedCtxCards}
                 setCollapsedCtxCards={setCollapsedCtxCards}
+                apiBase={apiBase}
+                activeId={activeId}
+                onContextUpdated={handleContextUpdated}
               />
             </div>
           </div>

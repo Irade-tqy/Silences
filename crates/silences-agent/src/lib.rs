@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod context;
+pub mod surgery;
 pub mod toolcall;
 
 pub use agent::{AgentOutput, PreparedContext, run_agent_blocking, prepare_agent_context};

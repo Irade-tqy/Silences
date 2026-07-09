@@ -14,6 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::toolcall::regret::ToolHistory;
 use crate::toolcall::{self, ToolDef};
 use crate::context;
+use crate::surgery;
 
 /// Agent 产生的对外事件
 #[derive(Debug, Clone)]
@@ -114,9 +115,9 @@ async fn pause_until_resumed(
 /// agent 自行管理 LLM↔tool 循环，产生流式事件供后端转发 SSE。
 /// 同时将消息和用量持久化到数据库。
 /// `tool_history` 跨多次 agent run 共享（同 session 的撤回链）。
-/// `checkpoint` 是 messages 的回退点索引，[0..checkpoint) 稳定不变。
 /// `session_dir` 是会话的上下文目录（.silences/sessions/{id}），用于读写 CONTEXT.md。
 /// `active_runs` 用于 agent 自然退出时清理停止标志（保持不因 SSE 断开而清理）。
+/// `surgery_wait` 如果为 Some，则在每轮工具执行后检查 wait 条件是否达成。
 pub fn run_agent(
     llm: LlmClient,
     tools: Vec<ToolDef>,
@@ -131,6 +132,7 @@ pub fn run_agent(
     flags: Arc<RunFlags>,
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
     active_runs: Arc<Mutex<HashMap<String, Arc<RunFlags>>>>,
+    surgery_wait: Option<Arc<Mutex<Option<surgery::WaitState>>>>,
 ) -> ReceiverStream<AgentEvent> {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
 
@@ -476,6 +478,51 @@ pub fn run_agent(
                 messages.len(),
             );
 
+            // ── 手术刀 wait 条件检查 ──
+            if let Some(ref wait_mutex) = surgery_wait {
+                let condition = {
+                    let ws = wait_mutex.lock().await;
+                    ws.as_ref().map(|w| w.condition.clone())
+                };
+                if let Some(condition) = condition {
+                    let mut check_msgs = messages.clone();
+                    check_msgs.push(Message::new_user("orch",
+                        &format!("判断条件是否已经完成：{condition}\n只输出 y 或 n。不开思考")));
+
+                    match llm.chat_stream(&check_msgs,
+                        Some("只输出 y 或 n。不开思考"), None).await
+                    {
+                        Ok(mut stream) => {
+                            let mut text = String::new();
+                            loop {
+                                match stream.next_delta().await {
+                                    Ok(Some(StreamDelta::Text(t))) => text.push_str(&t),
+                                    Ok(Some(_)) => continue,
+                                    Ok(None) => break,
+                                    Err(_) => break,
+                                }
+                            }
+                            if text.trim().to_lowercase() == "y" {
+                                // 条件达成，通知 wait 工具返回
+                                let mut ws = wait_mutex.lock().await;
+                                if let Some(completer) = ws.as_mut().and_then(|w| w.completer.take()) {
+                                    let _ = completer.send(());
+                                }
+                                *ws = None;
+                                flags.signal_pause();
+                                {
+                                    let db_lock = db.lock().await;
+                                    let _ = db_lock.delete_surgery_wait(&session_id);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[agent] wait 条件检查 LLM 调用失败: {e}");
+                        }
+                    }
+                }
+            }
+
             // 继续下一轮（LLM 看到工具结果后继续）
         }
     });
@@ -522,6 +569,7 @@ pub async fn run_agent_blocking(
         flags,
         agent_contexts.clone(),
         active_runs,
+        None,  // 阻塞式 API 不使用 wait
     );
 
     // 消费完整事件流
