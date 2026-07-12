@@ -229,6 +229,7 @@ async fn handle_chat(
         state.agent_contexts.clone(),
         state.active_runs.clone(),
         None,  // 主 Agent 默认不携带 wait 状态，由 handle_surgery 设置
+        false,  // 主 Agent 需要持久化到 DB
     );
 
     // 将 AgentEvent 转换为 SSE Event
@@ -601,7 +602,30 @@ async fn handle_surgery(
 
     let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
 
-    // 启动手术刀 Agent 循环
+    // 创建/刷新 context.json（从内存快照或 DB 恢复当前上下文）
+    if let Some(ref dir) = session_dir {
+        let ctx_path = dir.join("context.json");
+        // 优先从内存快照获取，再从 DB 恢复
+        let msgs = {
+            let ctx_map = state.agent_contexts.lock().await;
+            ctx_map.get(&id).cloned()
+        };
+        let msgs = if let Some(msgs) = msgs {
+            msgs
+        } else {
+            let db = state.db.lock().await;
+            db.get_context_snapshot(&id).ok().flatten().unwrap_or_default()
+        };
+
+        if !msgs.is_empty() {
+            if let Ok(json) = serde_json::to_string_pretty(&msgs) {
+                let _ = std::fs::write(&ctx_path, &json);
+                eprintln!("[surgery] 已写入 context.json ({} 条消息)", msgs.len());
+            }
+        }
+    }
+
+    // 启动手术刀 Agent 循环（no_db_persist=true 避免写入主会话 DB）
     let agent_stream = run_agent(
         state.llm.clone_for_agent(),
         tools,
@@ -617,6 +641,7 @@ async fn handle_surgery(
         state.agent_contexts.clone(),
         state.active_runs.clone(),
         None,  // 手术刀 Agent 自身不检查 wait（wait 由主 Agent 检查）
+        true,  // no_db_persist: 手术刀模式不写主会话 DB
     );
 
     // 包装流：工具执行后同步 context.json

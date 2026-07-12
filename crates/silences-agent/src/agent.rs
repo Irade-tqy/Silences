@@ -80,6 +80,7 @@ async fn pause_until_resumed(
     agent_contexts: &tokio::sync::Mutex<HashMap<String, Vec<Message>>>,
     db: &tokio::sync::Mutex<Db>,
     active_runs: &tokio::sync::Mutex<HashMap<String, Arc<RunFlags>>>,
+    no_db_persist: bool,
 ) -> bool {
     let mut was_paused = false;
     while flags.should_pause() {
@@ -89,12 +90,12 @@ async fn pause_until_resumed(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         if flags.should_stop() {
-            // 停止时保存最终快照
-            {
+            // 停止时保存最终快照（手术刀模式跳过）
+            if !no_db_persist {
                 let mut map = agent_contexts.lock().await;
                 map.insert(session_id.to_string(), messages.to_vec());
             }
-            {
+            if !no_db_persist {
                 let db_lock = db.lock().await;
                 let _ = db_lock.save_context_snapshot(session_id, messages);
             }
@@ -118,6 +119,7 @@ async fn pause_until_resumed(
 /// `session_dir` 是会话的上下文目录（.silences/sessions/{id}），用于读写 CONTEXT.md。
 /// `active_runs` 用于 agent 自然退出时清理停止标志（保持不因 SSE 断开而清理）。
 /// `surgery_wait` 如果为 Some，则在每轮工具执行后检查 wait 条件是否达成。
+/// `no_db_persist` 如果为 true，跳过所有 DB 写入（用于手术刀 Agent，避免写入主会话 DB）。
 pub fn run_agent(
     llm: LlmClient,
     tools: Vec<ToolDef>,
@@ -133,6 +135,7 @@ pub fn run_agent(
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
     active_runs: Arc<Mutex<HashMap<String, Arc<RunFlags>>>>,
     surgery_wait: Option<Arc<Mutex<Option<surgery::WaitState>>>>,
+    no_db_persist: bool,
 ) -> ReceiverStream<AgentEvent> {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
 
@@ -155,13 +158,14 @@ pub fn run_agent(
         for round in 0..usize::MAX {
             let t_round = std::time::Instant::now();
             // 快照当前上下文供 /state 端点查询（仅在 messages 有变化时写入）
-            if messages_changed {
+            // 手术刀模式不更新 agent_contexts（由 sync_context_json 管理）
+            if messages_changed && !no_db_persist {
                 {
                     let mut map = agent_contexts.lock().await;
                     map.insert(session_id.clone(), messages.clone());
                 }
-                // 持久化到 DB，刷新页面后仍可恢复
-                {
+                // 持久化到 DB，刷新页面后仍可恢复（手术刀模式跳过）
+                if !no_db_persist {
                     let db_lock = db.lock().await;
                     let _ = db_lock.save_context_snapshot(&session_id, &messages);
                 }
@@ -171,7 +175,7 @@ pub fn run_agent(
             // 暂停等待循环（每轮开始时检查，等待外部 resume 或 stop）
             if flags.should_pause() {
                 if pause_until_resumed(&tx, &flags, &messages, &session_id,
-                    &agent_contexts, &db, &active_runs).await {
+                    &agent_contexts, &db, &active_runs, no_db_persist).await {
                     return;
                 }
             }
@@ -256,7 +260,7 @@ pub fn run_agent(
             // 如果推理期间收到暂停信号，流正常结束然后暂停，不执行工具
             if flags.should_pause() {
                 if pause_until_resumed(&tx, &flags, &messages, &session_id,
-                    &agent_contexts, &db, &active_runs).await {
+                    &agent_contexts, &db, &active_runs, no_db_persist).await {
                     return;
                 }
             }
@@ -269,7 +273,7 @@ pub fn run_agent(
                     if !full_reasoning.is_empty() {
                         final_asst.reasoning_content = Some(full_reasoning);
                     }
-                    {
+                    if !no_db_persist {
                         let db_lock = db.lock().await;
                         let _ = db_lock.save_message(&session_id, &final_asst);
                     }
@@ -278,10 +282,10 @@ pub fn run_agent(
                 }
 
                 // 保存用量（发送累计值）
-                accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round).await;
+                accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round, no_db_persist).await;
 
                 // 正常退出前最后一次快照（仅在 messages 有变化时写入）
-                if messages_changed {
+                if messages_changed && !no_db_persist {
                     {
                         let mut map = agent_contexts.lock().await;
                         map.insert(session_id.clone(), messages.clone());
@@ -321,13 +325,15 @@ pub fn run_agent(
             }
             {
                 let db_lock = db.lock().await;
-                let _ = db_lock.save_message(&session_id, &asst_msg);
+                if !no_db_persist {
+                    let _ = db_lock.save_message(&session_id, &asst_msg);
+                }
             }
             messages.push(asst_msg);
             messages_changed = true;
 
             // 保存本轮 usage（tool call 轮次的 API 用量，发送累计值）
-            accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round).await;
+            accumulate_usage(&usage, &mut total_usage, &tx, &db, &session_id, round, no_db_persist).await;
 
             // 逐个执行工具
             for tc in tc_accums.values() {
@@ -369,7 +375,7 @@ pub fn run_agent(
                             args: args_str.clone(), result: Some(err.clone()),
                         }).await;
                         let err_msg = Message::new_tool_result(&id, &err);
-                        {
+                        if !no_db_persist {
                             let db_lock = db.lock().await;
                             let _ = db_lock.save_message(&session_id, &err_msg);
                         }
@@ -387,7 +393,7 @@ pub fn run_agent(
                         args: args_str.clone(), result: Some(err.clone()),
                     }).await;
                     let err_msg = Message::new_tool_result(&id, &err);
-                    {
+                    if !no_db_persist {
                         let db_lock = db.lock().await;
                         let _ = db_lock.save_message(&session_id, &err_msg);
                     }
@@ -418,7 +424,7 @@ pub fn run_agent(
                         }
 
                         let tool_msg = Message::new_tool_result(&id, &outcome.summary);
-                        {
+                        if !no_db_persist {
                             let db_lock = db.lock().await;
                             let _ = db_lock.save_message(&session_id, &tool_msg);
                         }
@@ -434,7 +440,7 @@ pub fn run_agent(
                                     inject_msg.content = inject_msg.content.replace("CONTEXT.md", &ctx_path);
                                 }
                             }
-                            {
+                            if !no_db_persist {
                                 let db_lock = db.lock().await;
                                 let _ = db_lock.save_message(&session_id, &inject_msg);
                             }
@@ -449,7 +455,7 @@ pub fn run_agent(
                             args: args_str.clone(), result: Some(err.clone()),
                         }).await;
                         let err_msg = Message::new_tool_result(&id, &err);
-                        {
+                        if !no_db_persist {
                             let db_lock = db.lock().await;
                             let _ = db_lock.save_message(&session_id, &err_msg);
                         }
@@ -570,6 +576,7 @@ pub async fn run_agent_blocking(
         agent_contexts.clone(),
         active_runs,
         None,  // 阻塞式 API 不使用 wait
+        false, // 阻塞式 API 默认持久化到 DB
     );
 
     // 消费完整事件流
@@ -683,6 +690,7 @@ async fn accumulate_usage(
     db: &Arc<Mutex<Db>>,
     session_id: &str,
     round: usize,
+    no_db_persist: bool,
 ) {
     if let Some(u) = round_usage {
         let total = total_usage.as_ref().map(|t|
@@ -695,7 +703,7 @@ async fn accumulate_usage(
         ).unwrap_or_else(|| u.clone());
         *total_usage = Some(total.clone());
         let _ = tx.send(AgentEvent::Usage(total)).await;
-        {
+        if !no_db_persist {
             let db_lock = db.lock().await;
             let _ = db_lock.save_usage(session_id, round as u32, u);
         }
