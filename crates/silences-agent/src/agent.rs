@@ -726,7 +726,206 @@ fn clean_messages_for_llm(messages: &mut Vec<Message>) {
     });
 }
 
-/// 准备 agent 上下文：解析 session、保存用户消息、加载历史 + SILENCES.md
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use silences_core::ToolCallFunction;
+
+    fn make_asst(text: &str, reasoning: Option<&str>) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: text.into(),
+            name: None,
+            reasoning_content: reasoning.map(|s| s.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    fn make_asst_tc(text: &str, tcs: Vec<(&str, &str, &str)>) -> Message {
+        // tcs: (id, name, args_json)
+        Message {
+            role: "assistant".into(),
+            content: text.into(),
+            name: None,
+            reasoning_content: None,
+            tool_calls: Some(tcs.into_iter().map(|(id, name, args)| ToolCallValue {
+                id: id.into(),
+                call_type: "function".into(),
+                function: ToolCallFunction { name: name.into(), arguments: args.into() },
+            }).collect()),
+            tool_call_id: None,
+        }
+    }
+
+    fn make_tool(id: &str, content: &str) -> Message {
+        Message::new_tool_result(id, content)
+    }
+
+    #[test]
+    fn test_clean_reasoning_cleared() {
+        let mut msgs = vec![
+            make_asst("hello", Some("deep thoughts")),
+            make_asst("world", Some("more thinking")),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].reasoning_content.is_none());
+        assert!(msgs[1].reasoning_content.is_none());
+    }
+
+    #[test]
+    fn test_clean_failed_tool_removed() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "read", "{}"), ("c2", "command", r#"{"command":"echo hi"}"#)]),
+            make_tool("c1", "file content"),
+            make_tool("c2", "command 执行失败: permission denied"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        // c2 (failed) should be removed; c1 (success) kept
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "assistant");
+        let tcs = msgs[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "c1");
+        assert_eq!(msgs[1].role, "tool");
+        assert_eq!(msgs[1].content, "file content");
+    }
+
+    #[test]
+    fn test_clean_empty_assistant_removed() {
+        let mut msgs = vec![
+            make_asst("", None),
+            make_asst("real content", None),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "real content");
+    }
+
+    #[test]
+    fn test_clean_empty_assistant_after_tc_filter_removed() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "read", "{}")]),
+            make_tool("c1", "read 执行失败: not found"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        // assistant has no content and all tool_calls filtered → removed
+        // tool result of failed call → removed
+        assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn test_clean_command_folded() {
+        let mut msgs = vec![
+            make_asst_tc("some text", vec![("c1", "command", r#"{"command":"ls"}"#)]),
+            make_tool("c1", "$ ls\nfile1\nfile2\n退出码: 0"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1].content, "已执行");
+    }
+
+    #[test]
+    fn test_clean_command_last_preserved() {
+        let mut msgs = vec![
+            make_asst_tc("some text", vec![("c1", "command", r#"{"command":"ls","last":true}"#)]),
+            make_tool("c1", "$ ls\nfile1\nfile2\n退出码: 0"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1].content, "$ ls\nfile1\nfile2\n退出码: 0");
+    }
+
+    #[test]
+    fn test_clean_grep_folded() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "grep", r#"{"pattern":"fn"}"#)]),
+            make_tool("c1", "src/main.rs:1:fn main()"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs[1].content, "已折叠");
+    }
+
+    #[test]
+    fn test_clean_find_folded() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "find", r#"{"pattern":"*.rs"}"#)]),
+            make_tool("c1", "src/main.rs\nsrc/lib.rs"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs[1].content, "已折叠");
+    }
+
+    #[test]
+    fn test_clean_replace_dry_run_folded() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "replace", r#"{"pattern":"old","replacement":"new","extensions":["rs"],"dry_run":true}"#)]),
+            make_tool("c1", "[DRY RUN] 将在 3 个文件中替换:\nsrc/a.rs\nsrc/b.rs"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs[1].content, "已折叠");
+    }
+
+    #[test]
+    fn test_clean_replace_non_dry_preserved() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "replace", r#"{"pattern":"old","replacement":"new","extensions":["rs"]}"#)]),
+            make_tool("c1", "批量替换完成 (2 个文件):\nsrc/a.rs\nsrc/b.rs"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs[1].content, "批量替换完成 (2 个文件):\nsrc/a.rs\nsrc/b.rs");
+    }
+
+    #[test]
+    fn test_clean_parse_error_filtered() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "read", r#"{"path":"x"}"#)]),
+            make_tool("c1", "解析 read 参数失败: invalid json"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn test_clean_stopped_tool_filtered() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("c1", "read", r#"{"path":"x"}"#)]),
+            make_tool("c1", "已停止"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn test_clean_mixed_success_and_failure() {
+        let mut msgs = vec![
+            make_asst_tc("found results",
+                vec![("g1", "grep", r#"{"pattern":"fn"}"#), ("c1", "command", r#"{"command":"ls"}"#)]),
+            make_tool("g1", "src/main.rs:1:fn main()\nsrc/lib.rs:5:fn help()"),
+            make_tool("c1", "command 执行失败: not found"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        let tcs = msgs[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "g1");
+        assert_eq!(msgs[1].content, "已折叠");
+    }
+
+    #[test]
+    fn test_clean_other_tools_unchanged() {
+        let mut msgs = vec![
+            make_asst_tc("", vec![("r1", "read", r#"{"path":"main.rs"}"#), ("w1", "write", r#"{"path":"x.rs","content":"fn main() {}"}"#)]),
+            make_tool("r1", "fn main() {}"),
+            make_tool("w1", "已写入 x.rs (1 行)"),
+        ];
+        clean_messages_for_llm(&mut msgs);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1].content, "fn main() {}");
+        assert_eq!(msgs[2].content, "已写入 x.rs (1 行)");
+    }
+}
 ///
 /// 从 server `handle_chat()` 中提取的共享逻辑，server 和 lib 均可使用。
 pub async fn prepare_agent_context(

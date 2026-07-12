@@ -61,6 +61,7 @@
 
   --ds-interactive-hover: rgba(255,255,255,0.08);
   --ds-interactive-hover-solid: #353638;
+  --ds-interactive-secondary: #2C2C2E;
 
   --ds-sidebar-fill: #1B1B1C;
   --ds-sidebar-nav-active: #43454A;
@@ -74,6 +75,8 @@
   --ds-md-code-banner: #2C2C2E;
   --ds-md-citation: #353638;
 
+  --ds-accent: #5686FE;
+  --ds-bg-tertiary: #353638;
   --ds-state-error: #F25A5A;
   --ds-state-warn: #F59E0B;
   --ds-state-success: #22C55E;
