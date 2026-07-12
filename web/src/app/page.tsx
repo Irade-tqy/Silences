@@ -21,8 +21,8 @@ export default function Page() {
   const [collapsedThinking, setCollapsedThinking] = useState<Record<number, boolean>>({});
   const [collapsedToolCalls, setCollapsedToolCalls] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null, warmup_enabled: true });
-  const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true });
+  const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null, warmup_enabled: true, auto_collapse_prev: true });
+  const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true, auto_collapse_prev: true });
   const [settingsSaving, setSettingsSaving] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const msgEndRef = useRef<HTMLDivElement>(null);
@@ -65,7 +65,7 @@ export default function Page() {
       if (res.ok) {
         const data: AppSettings = await res.json();
         setSettings(data);
-        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled });
+        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled, auto_collapse_prev: data.auto_collapse_prev });
       } else {
         console.warn('GET /settings 失败:', res.status);
       }
@@ -166,6 +166,7 @@ export default function Page() {
         body.system_prompt = cur.system_prompt || null;
       }
       body.warmup_enabled = cur.warmup_enabled;
+      body.auto_collapse_prev = cur.auto_collapse_prev;
       await fetch(`${apiBase}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },

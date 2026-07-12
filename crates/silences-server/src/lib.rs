@@ -52,6 +52,8 @@ struct AppState {
     tool_delay_ms: AtomicU64,
     /// 是否启用 agent loop prefix cache 预热
     warmup_enabled: AtomicBool,
+    /// 发送消息时自动清理上下文
+    auto_collapse_prev: AtomicBool,
     /// 每个会话最后一次发给 LLM 的 messages 快照
     agent_contexts: Arc<Mutex<HashMap<String, Vec<Message>>>>,
     /// 手术刀 wait 状态（每个会话一个，手术刀 Agent ↔ 主 Agent 同步）
@@ -107,6 +109,10 @@ pub async fn serve(
         .and_then(|s| s.parse::<u8>().ok())
         .map(|v| v != 0)
         .unwrap_or(true);
+    let auto_collapse_prev = db.get_setting("auto_collapse_prev").ok().flatten()
+        .and_then(|s| s.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true);
 
     // 启动时检查之前未完成的 wait
     let pending_waits = db.list_pending_waits().ok().unwrap_or_default();
@@ -123,6 +129,7 @@ pub async fn serve(
         project_root,
         tool_delay_ms: AtomicU64::new(tool_delay_ms),
         warmup_enabled: AtomicBool::new(warmup_enabled),
+        auto_collapse_prev: AtomicBool::new(auto_collapse_prev),
         agent_contexts: Arc::new(Mutex::new(HashMap::new())),
         surgery_waits: Arc::new(Mutex::new(HashMap::new())),
     });
@@ -315,7 +322,8 @@ async fn handle_get_settings(
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
     let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
     let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
-    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled }))
+    let auto_collapse_prev = state.auto_collapse_prev.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled, auto_collapse_prev }))
 }
 
 /// 更新设置
@@ -360,6 +368,12 @@ async fn handle_put_settings(
         let db = state.db.lock().await;
         let _ = db.set_setting("warmup_enabled", &(enabled as u8).to_string());
     }
+    // 更新 auto_collapse_prev 开关
+    if let Some(enabled) = update.auto_collapse_prev {
+        state.auto_collapse_prev.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let db = state.db.lock().await;
+        let _ = db.set_setting("auto_collapse_prev", &(enabled as u8).to_string());
+    }
 
     // 返回当前设置
     let api_key = state.llm.api_key_snapshot();
@@ -367,7 +381,8 @@ async fn handle_put_settings(
     let system_prompt = state.system_prompt.lock().ok().and_then(|sp| sp.clone());
     let tool_delay_ms = state.tool_delay_ms.load(std::sync::atomic::Ordering::Relaxed);
     let warmup_enabled = state.warmup_enabled.load(std::sync::atomic::Ordering::Relaxed);
-    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled }))
+    let auto_collapse_prev = state.auto_collapse_prev.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(Settings { api_key: masked, system_prompt, tool_delay_ms, warmup_enabled, auto_collapse_prev }))
 }
 
 /// 列出所有会话

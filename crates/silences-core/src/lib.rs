@@ -322,9 +322,13 @@ pub struct Settings {
     /// 是否启用 agent loop 提示词预热（prefix cache 激活）
     #[serde(default = "default_warmup")]
     pub warmup_enabled: bool,
+    /// 发送消息时自动清理上下文（去 reasoning/过滤失败 tool call/精简结果）
+    #[serde(default = "default_auto_collapse")]
+    pub auto_collapse_prev: bool,
 }
 
 fn default_warmup() -> bool { true }
+fn default_auto_collapse() -> bool { true }
 
 /// 更新设置的请求体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +341,9 @@ pub struct SettingsUpdate {
     /// 是否启用 prefix cache 预热，None 表示不更新
     #[serde(default)]
     pub warmup_enabled: Option<bool>,
+    /// 发送消息时自动清理上下文，None 表示不更新
+    #[serde(default)]
+    pub auto_collapse_prev: Option<bool>,
 }
 
 /// 当前会话运行时状态（后端计算，前端只负责渲染）

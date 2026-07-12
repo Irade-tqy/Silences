@@ -765,6 +765,15 @@ pub async fn prepare_agent_context(
         db.get_messages(&session_id)?
     };
 
+    // 读取 auto_collapse_prev 设置
+    let auto_collapse_prev = {
+        let db_lock = db.lock().await;
+        db_lock.get_setting("auto_collapse_prev").ok().flatten()
+            .and_then(|s| s.parse::<u8>().ok())
+            .map(|v| v != 0)
+            .unwrap_or(true)
+    };
+
     // 加载 SILENCES.md（role: system）
     let ctx = context::load_project_context(project_root, Some(&session_id));
     let silences_name = ctx.session_dir.join("SILENCES.md").to_string_lossy().to_string();
@@ -781,8 +790,10 @@ pub async fn prepare_agent_context(
     }
     messages.extend(history);
 
-    // 清洗上下文发给 LLM：去掉 reasoning_content、过滤失败 tool call、精简结果
-    clean_messages_for_llm(&mut messages);
+    // 清洗上下文发给 LLM（按设置开关）
+    if auto_collapse_prev {
+        clean_messages_for_llm(&mut messages);
+    }
 
     Ok(PreparedContext {
         session_id,
