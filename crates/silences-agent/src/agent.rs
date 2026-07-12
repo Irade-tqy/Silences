@@ -1,6 +1,6 @@
 //! Agent 循环：LLM ↔ 工具调度 ↔ 流式输出
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -618,6 +618,114 @@ pub async fn run_agent_blocking(
     })
 }
 
+/// 清洗消息上下文：去掉思考过程、过滤失败工具调用、精简可折叠工具的结果
+///
+/// 此函数在 prepare_agent_context 末尾调用，确保每次 LLM 调用前上下文整洁。
+/// - 所有 assistant 的 reasoning_content → None
+/// - 过滤失败的 tool call（参数解析/执行失败/被停止）及其 tool result
+/// - 过滤后空的 assistant 消息删除
+/// - command → "已执行"（除非 last=true）
+/// - grep / find → "已折叠"
+/// - replace dry_run → "已折叠"
+fn clean_messages_for_llm(messages: &mut Vec<Message>) {
+    // 1. 清扫所有 assistant 的 reasoning_content
+    for msg in messages.iter_mut() {
+        if msg.role == "assistant" {
+            msg.reasoning_content = None;
+        }
+    }
+
+    // 2. 收集 tool call 元数据：name + arguments
+    let mut call_id_to_name: HashMap<String, String> = HashMap::new();
+    let mut call_id_to_args: HashMap<String, Value> = HashMap::new();
+    for msg in messages.iter() {
+        if msg.role == "assistant" {
+            if let Some(ref tcs) = msg.tool_calls {
+                for tc in tcs {
+                    call_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
+                    let args: Value = serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                    call_id_to_args.insert(tc.id.clone(), args);
+                }
+            }
+        }
+    }
+
+    // 3. 识别失败的 tool call（参数解析失败 / 执行失败 / 用户停止）
+    let mut failed_ids: HashSet<String> = HashSet::new();
+    for msg in messages.iter() {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                let c = &msg.content;
+                let is_failed = c == "已停止"
+                    || c.contains("执行失败")
+                    || (c.starts_with("解析") && c.contains("参数失败"));
+                if is_failed {
+                    failed_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    // 4. 从 assistant 消息中移除失败的 tool call
+    for msg in messages.iter_mut() {
+        if msg.role == "assistant" {
+            if let Some(ref mut tcs) = msg.tool_calls {
+                tcs.retain(|tc| !failed_ids.contains(&tc.id));
+            }
+        }
+    }
+
+    // 5. 替换成功 tool call 的结果内容
+    let mut remove_ids: HashSet<String> = HashSet::new();
+    for msg in messages.iter_mut() {
+        if msg.role == "tool" {
+            if let Some(id) = msg.tool_call_id.clone() {
+                if failed_ids.contains(&id) {
+                    remove_ids.insert(id.clone());
+                } else if let Some(name) = call_id_to_name.get(&id) {
+                    match name.as_str() {
+                        "command" => {
+                            let is_last = call_id_to_args.get(&id)
+                                .and_then(|a| a.get("last"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            if !is_last {
+                                msg.content = "已执行".into();
+                            }
+                        }
+                        "grep" | "find" => msg.content = "已折叠".into(),
+                        "replace" if msg.content.starts_with("[DRY RUN]") => {
+                            msg.content = "已折叠".into();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. 删除失败 tool call 的结果 + 空 assistant 消息
+    messages.retain(|msg| {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                if remove_ids.contains(id) {
+                    return false;
+                }
+            }
+        }
+        if msg.role == "assistant" {
+            let has_content = !msg.content.is_empty();
+            let has_tool_calls = msg.tool_calls.as_ref()
+                .map(|tcs| !tcs.is_empty())
+                .unwrap_or(false);
+            if !has_content && !has_tool_calls {
+                return false;
+            }
+        }
+        true
+    });
+}
+
 /// 准备 agent 上下文：解析 session、保存用户消息、加载历史 + SILENCES.md
 ///
 /// 从 server `handle_chat()` 中提取的共享逻辑，server 和 lib 均可使用。
@@ -673,6 +781,8 @@ pub async fn prepare_agent_context(
     }
     messages.extend(history);
 
+    // 清洗上下文发给 LLM：去掉 reasoning_content、过滤失败 tool call、精简结果
+    clean_messages_for_llm(&mut messages);
 
     Ok(PreparedContext {
         session_id,

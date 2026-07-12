@@ -51,6 +51,10 @@ pub fn tool(console_dir: Option<PathBuf>, limits: ToolLimits) -> ToolDef {
                 "work_dir": {
                     "type": "string",
                     "description": "工作目录的绝对路径（默认项目根目录）"
+                },
+                "last": {
+                    "type": "boolean",
+                    "description": "设为 true 时保留完整输出，下一条消息不折叠此项结果"
                 }
             },
             "required": ["command"],

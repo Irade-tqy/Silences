@@ -21,8 +21,8 @@ export default function Page() {
   const [collapsedThinking, setCollapsedThinking] = useState<Record<number, boolean>>({});
   const [collapsedToolCalls, setCollapsedToolCalls] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null, warmup_enabled: true, auto_collapse_prev: true });
-  const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true, auto_collapse_prev: true });
+  const [settings, setSettings] = useState<AppSettings>({ api_key: null, system_prompt: null, warmup_enabled: true });
+  const [settingsDirty, setSettingsDirty] = useState<AppSettings>({ api_key: '', system_prompt: '', warmup_enabled: true });
   const [settingsSaving, setSettingsSaving] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const msgEndRef = useRef<HTMLDivElement>(null);
@@ -65,7 +65,7 @@ export default function Page() {
       if (res.ok) {
         const data: AppSettings = await res.json();
         setSettings(data);
-        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled, auto_collapse_prev: data.auto_collapse_prev });
+        setSettingsDirty({ api_key: '', system_prompt: data.system_prompt || '', warmup_enabled: data.warmup_enabled });
       } else {
         console.warn('GET /settings 失败:', res.status);
       }
@@ -166,7 +166,6 @@ export default function Page() {
         body.system_prompt = cur.system_prompt || null;
       }
       body.warmup_enabled = cur.warmup_enabled;
-      body.auto_collapse_prev = cur.auto_collapse_prev;
       await fetch(`${apiBase}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -216,25 +215,6 @@ export default function Page() {
     setLoading(true);
     setPaused(false);
     setCollapsedToolCalls({});
-
-    // 自动折叠上一条回复的思考过程和工具调用
-    if (settings.auto_collapse_prev && messages.length > 0) {
-      const collapseThinking: Record<number, boolean> = {};
-      const collapseToolCalls: Record<string, boolean> = {};
-      for (let i = 0; i < messages.length; i++) {
-        const msg = messages[i];
-        if (msg.role === 'assistant') {
-          if (msg.reasoning) collapseThinking[i] = true;
-          if (msg.toolCalls) {
-            msg.toolCalls.forEach((_, tci) => {
-              collapseToolCalls[`${i}-${tci}`] = true;
-            });
-          }
-        }
-      }
-      setCollapsedThinking(prevCT => ({ ...prevCT, ...collapseThinking }));
-      setCollapsedToolCalls(prevCT => ({ ...prevCT, ...collapseToolCalls }));
-    }
 
     const userMsg: Message = { role: 'user', content: text };
     setMessages(prev => [...prev, userMsg]);
@@ -417,7 +397,7 @@ export default function Page() {
       setPaused(false);
       loadSessions();
     }
-  }, [input, loading, activeId, apiBase, loadSessions, settings, messages]);
+  }, [input, loading, activeId, apiBase, loadSessions]);
 
   const stopGeneration = useCallback(async () => {
     if (!activeId) return;

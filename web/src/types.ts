@@ -36,7 +36,6 @@ export interface AppSettings {
   api_key: string | null;
   system_prompt: string | null;
   warmup_enabled: boolean;
-  auto_collapse_prev: boolean;
 }
 
 export interface RawToolCall {
