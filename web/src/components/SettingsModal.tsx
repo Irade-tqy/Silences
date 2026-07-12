@@ -71,10 +71,24 @@ export default function SettingsModal({
               {settingsDirty.warmup_enabled ? '启用（~2s 延迟）' : '关闭'}
             </span>
           </div>
+          <div className="settings-field settings-toggle-row">
+            <label className="settings-label">自动折叠思考过程</label>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={settingsDirty.auto_collapse_prev}
+                onChange={e => setSettingsDirty(prev => ({ ...prev, auto_collapse_prev: e.target.checked }))}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="settings-toggle-hint">
+              {settingsDirty.auto_collapse_prev ? '发消息时自动折叠上一条回复' : '关闭'}
+            </span>
+          </div>
         </div>
         <div className="settings-modal-footer">
           <button className="settings-cancel-btn" onClick={() => {
-            setSettingsDirty({ api_key: '', system_prompt: settings.system_prompt || '', warmup_enabled: settings.warmup_enabled });
+            setSettingsDirty({ api_key: '', system_prompt: settings.system_prompt || '', warmup_enabled: settings.warmup_enabled, auto_collapse_prev: settings.auto_collapse_prev });
             setSettingsOpen(false);
           }}>取消</button>
           <button className="settings-save-btn" onClick={async () => {
